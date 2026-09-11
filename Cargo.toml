@@ -1,0 +1,15 @@
+[package]
+name = "s-parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memmap2 = "0.9"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"] }
+
+[dev-dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
