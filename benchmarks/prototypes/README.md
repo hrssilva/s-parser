@@ -46,7 +46,7 @@ python3 scripts/check_w3c.py /path/to/rdf-tests
 ```
 
 Apply the advice-only patch to a separate baseline copy, not on top of the SIMD
-patch, for the isolated comparison in the report:
+patch, for an isolated comparison:
 
 ```sh
 git apply benchmarks/prototypes/sequential-advice.patch

@@ -15,7 +15,7 @@ parser.add_argument("--repeats", type=int, default=3)
 parser.add_argument("--window-mib", type=int, default=8)
 parser.add_argument("--buffers", nargs="+", type=int, choices=[1, 2], default=[1])
 parser.add_argument("--readers", nargs="+", type=int, default=[0, 1, 2, 4, 8])
-parser.add_argument("--output", type=pathlib.Path, required=True)
+parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("private/gzip-stages.json"))
 args = parser.parse_args()
 if min(args.repeats, args.window_mib) < 1:
     parser.error("repeats and window size must be positive")

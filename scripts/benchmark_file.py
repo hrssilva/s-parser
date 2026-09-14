@@ -19,7 +19,7 @@ parser.add_argument("--gzip-file", type=pathlib.Path, help="Compare with a gzip 
 parser.add_argument("--threads", nargs="+", type=int)
 parser.add_argument("--repeats", type=int, default=3)
 parser.add_argument("--window-mib", type=int, default=8)
-parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("benchmark-results.json"))
+parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("private/benchmark-results.json"))
 args = parser.parse_args()
 if args.threads is None:
     args.threads = [1, 2, 4, 6, 8, 12]
