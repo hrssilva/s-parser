@@ -1,5 +1,6 @@
 //! Allocation-free N-Triples lexical scanner. Escapes are validated and retained.
-use super::{DecodeError, Decoded, LineTokenizer, TermType, Token, Tokenizer};
+use super::{DecodeError, Decoded, LineTokenizer, Tokenizer};
+use crate::rdf::{TermType, Token};
 
 mod simd;
 #[cfg(test)]

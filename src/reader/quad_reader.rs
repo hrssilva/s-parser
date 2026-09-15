@@ -1,68 +1,10 @@
-use super::Reader;
+use super::{ParseError, Reader};
 use crate::{
+    rdf::{Term, TermType, Token},
     stream::{SeekableStream, Stream},
-    tokenizer::{DecodeError, LineTokenizer, TermType, Token, Tokenizer},
+    tokenizer::{DecodeError, LineTokenizer, Tokenizer},
 };
-use std::{fmt, io, ops::Range};
-
-#[derive(Debug)]
-pub enum ParseError {
-    Io(io::Error),
-    InvalidRange,
-    Syntax { offset: u64, message: &'static str },
-    RecordTooLong { offset: u64, limit: usize },
-    DecoderContract { offset: u64 },
-}
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "{e}"),
-            Self::InvalidRange => write!(f, "invalid reader byte range"),
-            Self::Syntax { offset, message } => write!(f, "byte {offset}: {message}"),
-            Self::RecordTooLong { offset, limit } => {
-                write!(f, "record at byte {offset} exceeds {limit}-byte window")
-            }
-            Self::DecoderContract { offset } => {
-                write!(f, "decoder/source contract violated at byte {offset}")
-            }
-        }
-    }
-}
-impl std::error::Error for ParseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Self::Io(e) = self {
-            Some(e)
-        } else {
-            None
-        }
-    }
-}
-impl From<io::Error> for ParseError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Term<'a> {
-    token: Token,
-    record: &'a [u8],
-}
-impl<'a> Term<'a> {
-    pub fn kind(self) -> TermType {
-        self.token.kind()
-    }
-    pub fn text(self) -> &'a [u8] {
-        self.token.text(self.record).unwrap()
-    }
-    /// Serialized lexical value; escape sequences have not been unescaped.
-    pub fn value(self) -> &'a [u8] {
-        self.token.value(self.record).unwrap()
-    }
-    pub fn suffix(self) -> &'a [u8] {
-        self.token.suffix(self.record).unwrap()
-    }
-}
+use std::ops::Range;
 
 #[derive(Debug)]
 pub struct Quad<'a> {
@@ -97,10 +39,7 @@ impl<'a> Quad<'a> {
         (self.tokens[3].kind() != TermType::DefaultGraph).then(|| self.term(3))
     }
     fn term(&self, index: usize) -> Term<'a> {
-        Term {
-            token: self.tokens[index],
-            record: self.record,
-        }
+        Term::new(self.tokens[index], self.record)
     }
 }
 

@@ -1,79 +1,11 @@
-//! Token offsets are relative to one record, never to the entire file.
+//! Token offsets are relative to one record, never to the entire file. This
+//! module is the parsing *mechanism* — record decoding, independent of any
+//! one data model. Concrete RDF term types (`Token`, `TermType`) live in
+//! [`crate::rdf`]; `Decoded`'s default `Output` references them only as a
+//! convenience for RDF-shaped tokenizers like [`nt_tokenizer`].
 pub mod nt_tokenizer;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(u32)]
-pub enum TermType {
-    #[default]
-    DefaultGraph,
-    Iri,
-    BlankNode,
-    Literal,
-    LanguageLiteral,
-    TypedLiteral,
-}
-
-/// Four tokens occupy 64 bytes. Lexical values retain escapes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
-pub struct Token {
-    kind: TermType,
-    start: u32,
-    value_end: u32,
-    end: u32,
-}
-
-impl Token {
-    /// Offsets include the opener at `start`, exclude the closing delimiter at
-    /// `value_end`, and include any language/datatype suffix up to `end`.
-    pub fn new(kind: TermType, start: u32, value_end: u32, end: u32) -> Option<Self> {
-        let token = Self {
-            kind,
-            start,
-            value_end,
-            end,
-        };
-        let closer = u32::from(matches!(
-            kind,
-            TermType::Iri | TermType::Literal | TermType::LanguageLiteral | TermType::TypedLiteral
-        ));
-        (start
-            .checked_add(token.opener())
-            .is_some_and(|v| v <= value_end)
-            && value_end.checked_add(closer).is_some_and(|v| v <= end))
-        .then_some(token)
-    }
-    fn opener(self) -> u32 {
-        match self.kind {
-            TermType::DefaultGraph => 0,
-            TermType::BlankNode => 2,
-            _ => 1,
-        }
-    }
-    pub fn kind(self) -> TermType {
-        self.kind
-    }
-    pub fn start(self) -> usize {
-        self.start as usize
-    }
-    pub fn end(self) -> usize {
-        self.end as usize
-    }
-    pub fn text(self, record: &[u8]) -> Option<&[u8]> {
-        record.get(self.start as usize..self.end as usize)
-    }
-    pub fn value(self, record: &[u8]) -> Option<&[u8]> {
-        record.get((self.start + self.opener()) as usize..self.value_end as usize)
-    }
-    /// Written suffix (`@en` or `^^<...>`), empty for other terms.
-    pub fn suffix(self, record: &[u8]) -> Option<&[u8]> {
-        let start = match self.kind {
-            TermType::LanguageLiteral | TermType::TypedLiteral => self.value_end + 1,
-            _ => self.end,
-        };
-        record.get(start as usize..self.end as usize)
-    }
-}
+use crate::rdf::Token;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {

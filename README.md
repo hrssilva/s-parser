@@ -11,7 +11,17 @@ A Rust parsing core organized around three components:
 `NtTokenizer` handles N-Triples, with the fourth term representing the default
 graph. `FileStream` supplies windowed file mappings; `SliceStream` borrows
 existing memory. `GzStream` incrementally decompresses gzip files or any compressed
-`Read` input. Other RDF syntaxes are not implemented yet.
+`Read` input. Turtle is not implemented yet.
+
+SPARQL 1.1 Query is a fourth component built on the same three: a SPARQL query
+is self-delimiting by its own grammar, the same way an N-Triples record is
+self-delimited by `.` and a line terminator, so `SparqlTokenizer` treats one
+`QueryUnit` as one record and `QueryReader<S, T>` walks a *file of many
+concatenated queries* with the same bounded-window `Stream` machinery —
+`FileStream`/`GzStream` included. `parse_query` covers the common case of one
+query already in memory. Query text parses directly into a compact SPARQL
+algebra tree (`s_parser::sparql`) instead of an intermediate concrete-syntax
+AST — see [SPARQL Query](#sparql-query) below.
 
 ## Add the library
 
@@ -224,6 +234,83 @@ The architecture follows the parser ideas in the recovered `DESIGN.md`, using
 bounded mappings and borrowing lifetimes in place of a whole-file mapping with
 advisory page release. Grammar reference: [W3C RDF 1.1 N-Triples](https://www.w3.org/TR/n-triples/).
 File mapping safety reference: [memmap2 MmapOptions](https://docs.rs/memmap2/latest/memmap2/struct.MmapOptions.html).
+
+## SPARQL Query
+
+```rust
+use s_parser::parse_query;
+use s_parser::sparql::algebra::Algebra;
+
+let query = parse_query(b"PREFIX ex: <http://example.org/>
+    SELECT ?s WHERE { ?s a ex:Thing }")?;
+let data = query.data();
+let root = data.root.unwrap();
+if let Algebra::Project(bgp, _vars) = data.node(root) {
+    if let Algebra::Bgp(range) = data.node(bgp) {
+        assert_eq!(data.triples(range).len(), 1);
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`parse_query` is the common case: one query already in memory, borrowed
+directly with no `Stream`/`Reader` involved (there is nothing to window — see
+below). For a file of many concatenated queries — a query log or benchmark
+corpus — build a `QueryReader<S, T>` over any `Stream`, exactly like
+`QuadReader`:
+
+```rust,no_run
+use s_parser::{FileStream, QueryReader, SparqlTokenizer};
+
+let stream = unsafe { FileStream::open("queries.rq.log", 1024 * 1024)? };
+let mut reader = QueryReader::new(stream, SparqlTokenizer);
+while let Some(query) = reader.next()? {
+    std::hint::black_box(query.data().form);
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A SPARQL query is self-delimiting by its own grammar — `Prologue`, a query
+form, solution modifiers, then an optional `ValuesClause`, and nothing more
+belongs to that `QueryUnit` — the same way an N-Triples record is
+self-delimited by `.` and a line terminator. `SparqlTokenizer` treats one
+`QueryUnit` as one record, so it fits the same `Tokenizer` contract
+(`NeedMore` on a truncated window, `window_size` bounding the largest single
+query) and the same `Stream` implementations — `FileStream`'s mmap windows and
+`GzStream`'s incremental inflation apply here for free. There is no
+`for_range`/parallel support: SPARQL property paths and long string literals
+can legally contain raw CR/LF, so `SparqlTokenizer` does not implement
+`LineTokenizer`, the same reason N-Triples' long-string-free grammar is what
+lets it implement that trait at all.
+
+Parsing translates directly into a compact SPARQL algebra tree
+(`s_parser::sparql::algebra::Algebra`) rather than an intermediate
+concrete-syntax AST — the tokenizer's `Output` for one query, playing the
+role `[Token; 4]` plays for one N-Triples record, just variable-size instead
+of fixed. Every node (`Algebra`, `Expr`, `PathExpr`) is `Copy` and refers to
+its children by index into flat per-kind pools on the query's arena
+(`s_parser::sparql::algebra::QueryData`) rather than through `Box`, so a
+parsed query is one set of growable `Vec`s, never a tree of individual heap
+allocations. Terms (`s_parser::sparql::term::Term`) are spans into the source
+text, not references, so resolving a `PREFIX`-declared name never allocates
+either — see `Prologue::resolve`. `sparql::Term` and `rdf::Term` are
+deliberately different types: one is a position in SPARQL query syntax
+(a variable, a prefixed name not yet resolved), the other a decoded RDF term.
+
+Covers SELECT/ASK/CONSTRUCT/DESCRIBE, basic graph patterns, FILTER/OPTIONAL/
+UNION/MINUS/BIND/VALUES/GRAPH, subqueries, property paths, the full builtin
+function and aggregate vocabulary, and GROUP BY/HAVING/ORDER BY/LIMIT/OFFSET.
+`SERVICE` (federated query) and SPARQL Update are not implemented. Aggregates
+are hoisted out of `SELECT`/`HAVING`/`ORDER BY` expressions into their
+enclosing `Group` node following the algebra translation order in
+[§18.2.5](https://www.w3.org/TR/sparql11-query/#sparqlAlgebraEval) of the
+spec; `OPTIONAL { P FILTER F }`'s filter becomes `LeftJoin`'s own join
+condition rather than a plain nested `Filter`, since it can reference
+variables from the left-hand side that a nested `Filter` on `P` alone
+wouldn't see. Like N-Triples, this stays a lexical/structural layer:
+relative-IRI resolution against `BASE`, `PN_LOCAL` `\`-escape removal, and
+grammar-level arity/scope validation beyond what parsing itself requires are
+left to the caller.
 
 ## Benchmarking
 
