@@ -254,11 +254,14 @@ where applicable; gzip parser-reader counts exclude the inflater thread.
 
 | Input | Parser readers | Median time | Peak RSS |
 |---|---:|---:|---:|
-| plain | 1 | 0.510 s | 3.4 MiB |
-| plain | 4 | 0.141 s | 6.0 MiB |
-| gzip | 1 | 0.554 s | 3.6 MiB |
-| gzip | 2 | 0.300 s | 4.5 MiB |
-| gzip | 4 | 0.178 s | 4.5 MiB |
+| plain | 1 | 0.505 s | 3.4 MiB |
+| plain | 4 | 0.148 s | 6.0 MiB |
+| gzip | 1 | 0.553 s | 3.6 MiB |
+| gzip | 2 | 0.285 s | 4.5 MiB |
+| gzip | 4 | 0.185 s | 4.6 MiB |
+
+The [verification rerun](benchmarks/w3c-verification.md) compares these numbers
+with the previous results and records the correctness checks.
 
 Reports and inputs from private datasets belong under `private/`, which Git
 ignores. General-purpose benchmark output defaults there. Generated public test

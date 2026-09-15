@@ -26,11 +26,11 @@ throughput uses decoded bytes. Input generation and compilation are excluded.
 
 | Input | Parser readers | Median seconds | Range seconds | Decoded MiB/s | Max RSS MiB |
 |---|---:|---:|---:|---:|---:|
-| plain | 1 | 0.510 | 0.504–0.515 | 502.2 | 3.4 |
-| plain | 4 | 0.141 | 0.140–0.176 | 1,817.2 | 6.0 |
-| gzip | 1 | 0.554 | 0.554–0.563 | 461.8 | 3.6 |
-| gzip | 2 | 0.300 | 0.273–0.317 | 853.2 | 4.5 |
-| gzip | 4 | 0.178 | 0.172–0.205 | 1,436.4 | 4.5 |
+| plain | 1 | 0.505 | 0.500–0.524 | 507.1 | 3.4 |
+| plain | 4 | 0.148 | 0.141–0.180 | 1,724.2 | 6.0 |
+| gzip | 1 | 0.553 | 0.551–0.565 | 462.7 | 3.6 |
+| gzip | 2 | 0.285 | 0.279–0.289 | 899.2 | 4.5 |
+| gzip | 4 | 0.185 | 0.168–0.203 | 1,386.9 | 4.6 |
 
 Plain input uses one bounded mmap per reader. Serial gzip uses one window;
 parallel gzip uses **two shared windows total**, plus an inflater/input buffer
