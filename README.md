@@ -225,47 +225,16 @@ bounded mappings and borrowing lifetimes in place of a whole-file mapping with
 advisory page release. Grammar reference: [W3C RDF 1.1 N-Triples](https://www.w3.org/TR/n-triples/).
 File mapping safety reference: [memmap2 MmapOptions](https://docs.rs/memmap2/latest/memmap2/struct.MmapOptions.html).
 
-## Validation and reproducible W3C measurements
+## Benchmarking
 
-Public reports use the [W3C RDF test corpus](https://github.com/w3c/rdf-tests).
-The RDF 1.1 N-Triples manifest contains 41 positive and 29 negative syntax cases.
-Each case is checked with plain input, serial gzip, and four parallel gzip
-readers: **210 checks**. These are syntax checks, not full RDF semantic evaluation.
-
-```sh
-git clone --depth 1 https://github.com/w3c/rdf-tests.git /tmp/rdf-tests
-python3 scripts/check_w3c.py /tmp/rdf-tests
-python3 scripts/benchmark_w3c.py /tmp/rdf-tests
-```
-
-The benchmark joins the positive fixtures with a newline between files, then
-repeats that block to create a larger workload. It measures plain, serial gzip,
-and alternating-window gzip parsing without retaining records. This repeated
-conformance workload is useful for reproducible comparisons; its size and high
-compressibility do not make it representative of arbitrary production graphs.
-See [the W3C report](benchmarks/w3c-rdf11.md) for measured times, memory, exact
-provenance, and raw results.
-
-Measured on AMD Ryzen 5 PRO 4650U with Radeon Graphics with rustc 1.98.1 (48a229cea 2026-09-01), release compilation,
-1 MiB windows, and three runs per configuration. The generated
-workload contains **268,441,835 bytes and 2,942,862 triples**;
-gzip occupies **10,948,744 bytes**. Times include decompression
-where applicable; gzip parser-reader counts exclude the inflater thread.
-
-| Input | Parser readers | Median time | Peak RSS |
-|---|---:|---:|---:|
-| plain | 1 | 0.505 s | 3.4 MiB |
-| plain | 4 | 0.148 s | 6.0 MiB |
-| gzip | 1 | 0.553 s | 3.6 MiB |
-| gzip | 2 | 0.285 s | 4.5 MiB |
-| gzip | 4 | 0.185 s | 4.6 MiB |
-
-The [verification rerun](benchmarks/w3c-verification.md) compares these numbers
-with the previous results and records the correctness checks.
+Performance benchmarking (throughput, memory, plain vs. gzip, serial vs.
+parallel) lives in a separate repository,
+[`s-bench`](https://github.com/hrssilva/s-bench) — this repository doesn't
+depend on, clone, or check against any external RDF test corpus itself.
 
 Reports and inputs from private datasets belong under `private/`, which Git
-ignores. General-purpose benchmark output defaults there. Generated public test
-inputs and compiled artifacts live under ignored `target/`.
+ignores. Generated public test inputs and compiled artifacts live under
+ignored `target/`.
 
 ```sh
 cargo test --all-targets
