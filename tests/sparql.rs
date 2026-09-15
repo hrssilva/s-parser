@@ -193,6 +193,36 @@ fn values_clause_supports_undef() {
 }
 
 #[test]
+fn empty_prefix_names_resolve_correctly() {
+    // `PNAME_NS ::= PN_PREFIX? ':'` — the prefix itself is optional, so the
+    // default/empty prefix (`PREFIX : <...>` then bare `:x`) is ordinary,
+    // spec-legal SPARQL, not an edge case.
+    let q = ok("PREFIX : <http://example/> ASK { :x :p 1 }");
+    let data = q.data();
+    let root = data.root.unwrap();
+    let Algebra::Bgp(range) = data.node(root) else {
+        panic!("expected a Bgp, got {:?}", data.node(root))
+    };
+    let triple = data.triples(range)[0];
+    let Term::Iri(subject_iri) = triple.subject else {
+        panic!("expected an IRI subject, got {:?}", triple.subject)
+    };
+    let resolved = q.resolve(subject_iri).unwrap();
+    let (a, b) = resolved.parts();
+    assert_eq!([a, b].concat(), b"http://example/x");
+
+    // The same empty prefix inside a property path, and as a verb after `;`.
+    let q = ok("PREFIX : <http://example/> SELECT * WHERE { ?s :p/:q ?o }");
+    let data = q.data();
+    let root = data.root.unwrap();
+    assert!(matches!(data.node(root), Algebra::Path { .. }));
+
+    ok("PREFIX : <http://example/> SELECT * WHERE { ?s :p :o ; :q :r }");
+    // A bare `:` (empty prefix, empty local) alone is also a valid IRI.
+    ok("PREFIX : <http://example/> SELECT * WHERE { : :p :o }");
+}
+
+#[test]
 fn rejects_service() {
     err("SELECT * WHERE { SERVICE <urn:x> { ?s ?p ?o } }");
 }

@@ -272,9 +272,17 @@ impl<'a> Scanner<'a> {
     /// consuming it: the caller decides (by checking for an immediately
     /// following `:`, with no whitespace) whether this is a namespace
     /// prefix or a bare keyword/identifier, then commits by calling
-    /// [`Self::advance_to`].
+    /// [`Self::advance_to`]. `PNAME_NS ::= PN_PREFIX? ':'` makes the prefix
+    /// itself optional, so a bare `:` at the current position (the default/
+    /// empty-prefix case: `PREFIX : <...>` then `:x`) returns a zero-length
+    /// span right before it rather than `None` — the caller's own
+    /// following-`:` check then sees the colon exactly as it would after any
+    /// other prefix.
     pub fn peek_word(&self) -> Option<Span> {
         let start = self.pos;
+        if self.bytes.get(start) == Some(&b':') {
+            return Some(Span::new(start as u32, start as u32));
+        }
         let mut p = self.pos;
         let c = str_char_at(self.bytes, p)?;
         if !pn_chars_base(c) {
