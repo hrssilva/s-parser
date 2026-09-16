@@ -85,3 +85,28 @@ fn parsing_and_window_rollovers_allocate_no_token_storage() {
     assert_eq!(count, 1000);
     assert_eq!(ALLOCATIONS.with(Cell::get), 0);
 }
+
+#[test]
+fn sparql_parsing_does_not_copy_through_redundant_scratch_buffers() {
+    use s_parser::parse_query;
+    // A real W3C SPARQL corpus fixture shape (nested FILTER EXISTS), not a
+    // contrived worst case. `Term`/`TriplePattern`/`Algebra` are 28/84/64
+    // bytes (measured via `size_of`), so this ~250-byte query's actual
+    // payload is small; this bounds the *allocator* overhead on top of
+    // that, guarding against triples (or similar) round-tripping through
+    // more scratch buffers than necessary before reaching their pool --
+    // see `Parser::build_triples_node`, which pushes straight into
+    // `QueryData::triples` instead of copying through an extra `Vec` first.
+    let src = b"prefix ex: <http://www.example.org/>\n\nselect * where {\n  ?s ?p ex:o\n  filter exists { ?s ?p ex:o1  filter exists { ?s ?p ex:o2 } } \n}\n";
+    ALLOCATIONS.with(|count| count.set(0));
+    ALLOCATED_BYTES.with(|bytes| bytes.set(0));
+    TRACK.with(|track| track.set(true));
+    std::hint::black_box(parse_query(src).unwrap());
+    TRACK.with(|track| track.set(false));
+    let allocations = ALLOCATIONS.with(Cell::get);
+    let bytes = ALLOCATED_BYTES.with(Cell::get);
+    assert!(
+        allocations <= 9 && bytes <= 1800,
+        "regression: {allocations} allocations, {bytes} bytes (was 9/1760 after removing the redundant copy)"
+    );
+}

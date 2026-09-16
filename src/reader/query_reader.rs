@@ -17,11 +17,22 @@
 //! property paths and long string literals can contain raw CR/LF, so this
 //! tokenizer does not implement `LineTokenizer` and arbitrary byte-range
 //! partitioning would be unsafe.
+//!
+//! A `QueryData` here plays the same role `[Token; 4]` plays for N-Triples —
+//! the tokenizer's compact per-record output, built once and dropped with
+//! the `Query` that owns it, same as `Quad`/`Token`. The one structural
+//! difference is size: an N-Triples record is always exactly 4 terms, so
+//! `[Token; 4]` is a fixed-size, stack-resident value with nothing to
+//! allocate; a SPARQL algebra tree has no such bound, so its pools (see
+//! `sparql::algebra::QueryData`) are unavoidably heap-allocated. Every span
+//! *within* that tree — every `Term`, every `Iri` — still only ever holds
+//! `u32` offsets into the query's own bytes, the same borrowing discipline
+//! `rdf::Token` uses; nothing here copies query text.
 use super::{ParseError, Record, RecordReader};
 use crate::sparql::SparqlTokenizer;
 use crate::sparql::algebra::QueryData;
 use crate::sparql::term::{Iri, ResolvedIri};
-use crate::tokenizer::{DecodeError, Decoded, Tokenizer};
+use crate::tokenizer::{DecodeError, Tokenizer};
 
 pub type QueryReader<S, T = SparqlTokenizer> = RecordReader<S, T>;
 pub type Query<'a> = Record<'a, QueryData>;
@@ -43,7 +54,7 @@ impl<'a> Query<'a> {
 /// but trailing whitespace/comments follows the one `QueryUnit`.
 pub fn parse_query(src: &[u8]) -> Result<Query<'_>, ParseError> {
     match SparqlTokenizer.decode(src, true) {
-        Ok(Decoded {
+        Ok(crate::tokenizer::Decoded {
             tokens: Some(data),
             consumed,
         }) => {
@@ -60,7 +71,7 @@ pub fn parse_query(src: &[u8]) -> Result<Query<'_>, ParseError> {
             }
             Ok(Record::new(&src[..consumed], data, 0))
         }
-        Ok(Decoded { tokens: None, .. }) => Err(ParseError::Syntax {
+        Ok(crate::tokenizer::Decoded { tokens: None, .. }) => Err(ParseError::Syntax {
             offset: 0,
             message: "empty query",
         }),

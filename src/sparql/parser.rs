@@ -24,7 +24,10 @@ fn word_eq(bytes: &[u8], span: Span, target: &[u8]) -> bool {
 /// One triple produced while expanding a `TriplesBlock`: either a plain
 /// triple (destined for a `Bgp`) or one whose predicate is a genuine
 /// property path (destined for its own `Path` node). Kept apart so runs of
-/// plain triples can be merged into a single `Bgp`.
+/// plain triples can be merged into a single `Bgp`. `Copy` so the scratch
+/// buffer holding these (`Parser::scratch_items`) can be iterated without
+/// draining, letting the buffer itself be handed back for reuse untouched.
+#[derive(Clone, Copy, Debug)]
 enum RawTriple {
     Simple(TriplePattern),
     Complex(Term, PathId, Term),
@@ -60,11 +63,57 @@ enum ProjectionItem {
     Expr(ExprId, Var),
 }
 
+/// Transient work buffers that don't belong in [`QueryData`] (the *result*
+/// arena, kept lean on purpose) but would otherwise be allocated fresh,
+/// repeatedly, at every nesting level of a single parse — built fresh per
+/// [`Parser`] (so, unlike `QueryData`, dropped with it at the end of that
+/// one parse) purely to avoid *redundant* allocation within it, not to
+/// amortize across separate parses; see this module's top-level doc comment.
+///
+/// `items` (one `TriplesBlock`/`ConstructTemplate` use) and `elements` (one
+/// `Collection` use) are each handed out via `mem::take` and back via direct
+/// field assignment around their one caller. That's safe because those uses
+/// never nest reentrantly: whichever `TriplesBlock`/`Collection` is "in
+/// flight" always fully finishes — including giving its buffer back —
+/// before the next one starts, even across a property list or blank-node/
+/// collection term nested inside it (those only ever add more terms to the
+/// *same* in-flight buffer, never start a second one). Plain triples in
+/// `items` go straight into `QueryData::triples` — their final home either
+/// way — rather than through a second buffer first; see `build_triples_node`.
+///
+/// `filters` (one `GroupGraphPatternSub` use) is different: `FILTER EXISTS
+/// { ... }` embeds a whole nested `GroupGraphPattern`, so an outer group's
+/// `filters` buffer can still be "checked out" (mid-loop, not yet handed
+/// back) when a `FILTER`-containing group nested inside an `EXISTS` body
+/// needs its *own* buffer at the same time. A single slot would have the
+/// outer level's later hand-back clobber whatever the inner level already
+/// returned, losing that capacity every time rather than keeping it — so
+/// this is a small free list instead: each level pops a buffer (or gets a
+/// fresh one if the list's empty) and pushes it back when done, so nested
+/// levels draw from and return to a shared pool instead of fighting over
+/// one slot.
+#[derive(Debug, Default)]
+struct Scratch {
+    items: Vec<RawTriple>,
+    filters_pool: Vec<Vec<ExprId>>,
+    elements: Vec<Term>,
+}
+impl Scratch {
+    fn take_filters(&mut self) -> Vec<ExprId> {
+        self.filters_pool.pop().unwrap_or_default()
+    }
+    fn give_filters(&mut self, mut filters: Vec<ExprId>) {
+        filters.clear();
+        self.filters_pool.push(filters);
+    }
+}
+
 pub(super) struct Parser<'a> {
     s: Scanner<'a>,
     q: QueryData,
     blank_counter: u32,
     synth_counter: u32,
+    scratch: Scratch,
 }
 
 impl<'a> Parser<'a> {
@@ -74,6 +123,7 @@ impl<'a> Parser<'a> {
             q: QueryData::default(),
             blank_counter: 0,
             synth_counter: 0,
+            scratch: Scratch::default(),
         }
     }
     fn skip_trivia(&mut self) {
@@ -201,15 +251,15 @@ impl<'a> Parser<'a> {
             self.graph_term()
         }
     }
-    fn var_or_term_or_triples_node(&mut self, items: &mut Vec<RawTriple>) -> PResult<Term> {
+    fn var_or_term_or_triples_node(&mut self) -> PResult<Term> {
         self.skip_trivia();
         match self.s.peek() {
-            Some(b'[') => self.blank_node_property_list(items),
+            Some(b'[') => self.blank_node_property_list(),
             Some(b'(') => {
                 if self.s.try_nil()? {
                     Ok(Term::Iri(Iri::WellKnown(WellKnown::RdfNil)))
                 } else {
-                    self.collection(items)
+                    self.collection()
                 }
             }
             _ => self.var_or_term(),
@@ -391,16 +441,11 @@ impl<'a> Parser<'a> {
             Ok(Verb::Path(path))
         }
     }
-    fn object_list(
-        &mut self,
-        subject: Term,
-        verb: &Verb,
-        items: &mut Vec<RawTriple>,
-    ) -> PResult<()> {
+    fn object_list(&mut self, subject: Term, verb: &Verb) -> PResult<()> {
         loop {
             self.skip_trivia();
-            let object = self.var_or_term_or_triples_node(items)?;
-            items.push(match *verb {
+            let object = self.var_or_term_or_triples_node()?;
+            self.scratch.items.push(match *verb {
                 Verb::Simple(predicate) => RawTriple::Simple(TriplePattern {
                     subject,
                     predicate,
@@ -420,16 +465,12 @@ impl<'a> Parser<'a> {
         matches!(self.s.peek(), Some(b'?' | b'$' | b'<' | b'!' | b'^' | b'('))
             || self.s.peek_word().is_some()
     }
-    fn property_list_not_empty(
-        &mut self,
-        subject: Term,
-        items: &mut Vec<RawTriple>,
-    ) -> PResult<()> {
+    fn property_list_not_empty(&mut self, subject: Term) -> PResult<()> {
         loop {
             self.skip_trivia();
             let verb = self.verb()?;
             self.skip_trivia();
-            self.object_list(subject, &verb, items)?;
+            self.object_list(subject, &verb)?;
             self.skip_trivia();
             if self.s.peek() == Some(b';') {
                 self.s.pos += 1;
@@ -442,12 +483,18 @@ impl<'a> Parser<'a> {
             }
         }
     }
-    fn collection(&mut self, items: &mut Vec<RawTriple>) -> PResult<Term> {
+    fn collection(&mut self) -> PResult<Term> {
         self.s.expect(b'(')?;
         self.skip_trivia();
-        let mut elements = Vec::new();
+        // Taken/restored around this call (rather than left as a direct
+        // field the whole time) so a *nested* collection's own `collection`
+        // call — reached through `var_or_term_or_triples_node` below — finds
+        // an empty buffer instead of fighting this one for the same Vec;
+        // see `Scratch`'s doc comment.
+        let mut elements = std::mem::take(&mut self.scratch.elements);
         loop {
-            elements.push(self.var_or_term_or_triples_node(items)?);
+            let el = self.var_or_term_or_triples_node()?;
+            elements.push(el);
             self.skip_trivia();
             if self.s.peek() == Some(b')') {
                 break;
@@ -457,8 +504,8 @@ impl<'a> Parser<'a> {
         let head = self.fresh_blank();
         let mut cur = head;
         let n = elements.len();
-        for (i, el) in elements.into_iter().enumerate() {
-            items.push(RawTriple::Simple(TriplePattern {
+        for (i, el) in elements.iter().copied().enumerate() {
+            self.scratch.items.push(RawTriple::Simple(TriplePattern {
                 subject: cur,
                 predicate: Term::Iri(Iri::WellKnown(WellKnown::RdfFirst)),
                 object: el,
@@ -468,42 +515,59 @@ impl<'a> Parser<'a> {
             } else {
                 Term::Iri(Iri::WellKnown(WellKnown::RdfNil))
             };
-            items.push(RawTriple::Simple(TriplePattern {
+            self.scratch.items.push(RawTriple::Simple(TriplePattern {
                 subject: cur,
                 predicate: Term::Iri(Iri::WellKnown(WellKnown::RdfRest)),
                 object: rest,
             }));
             cur = rest;
         }
+        elements.clear();
+        self.scratch.elements = elements;
         Ok(head)
     }
-    fn blank_node_property_list(&mut self, items: &mut Vec<RawTriple>) -> PResult<Term> {
+    fn blank_node_property_list(&mut self) -> PResult<Term> {
         if self.s.try_anon()? {
             return Ok(self.fresh_blank());
         }
         self.s.expect(b'[')?;
         let node = self.fresh_blank();
         self.skip_trivia();
-        self.property_list_not_empty(node, items)?;
+        self.property_list_not_empty(node)?;
         self.skip_trivia();
         self.s.expect(b']')?;
         Ok(node)
     }
-    fn triples_same_subject_path(&mut self, items: &mut Vec<RawTriple>) -> PResult<()> {
+    fn triples_same_subject_path(&mut self) -> PResult<()> {
         self.skip_trivia();
-        let subject = self.var_or_term_or_triples_node(items)?;
+        let subject = self.var_or_term_or_triples_node()?;
         self.skip_trivia();
-        self.property_list_not_empty(subject, items)?;
+        self.property_list_not_empty(subject)?;
         Ok(())
     }
-    fn build_triples_node(&mut self, items: Vec<RawTriple>) -> NodeId {
+    /// Consumes `self.scratch.items` (built up by one or more preceding
+    /// `triples_same_subject_path` calls), batching runs of plain triples
+    /// into `Bgp`s and giving each property-path triple its own `Path` node.
+    ///
+    /// Simple triples go straight into `self.q.triples` — the pool that's
+    /// their final home either way — tracking only a `u32` run-start index
+    /// rather than copying through a second `Vec<TriplePattern>` first
+    /// (`Scratch` no longer has one — it used to, and on real queries that
+    /// meant three independent `Vec`s, each paying its own "grow from empty"
+    /// allocation, for what's ultimately a handful of triples: `scratch.items`
+    /// itself, that now-removed copy buffer, and `self.q.triples`).
+    fn build_triples_node(&mut self) -> NodeId {
+        let items = std::mem::take(&mut self.scratch.items);
         let mut acc: Option<NodeId> = None;
-        let mut pending: Vec<TriplePattern> = Vec::new();
-        for item in items {
+        let mut run_start: Option<u32> = None;
+        for item in items.iter().copied() {
             match item {
-                RawTriple::Simple(t) => pending.push(t),
+                RawTriple::Simple(t) => {
+                    run_start.get_or_insert_with(|| self.q.triples.start());
+                    self.q.triples.push(t);
+                }
                 RawTriple::Complex(s, p, o) => {
-                    if let Some(node) = self.flush_pending(&mut pending) {
+                    if let Some(node) = self.flush_run(&mut run_start) {
                         acc = Some(self.join(acc, node));
                     }
                     let node = self.push_node(Algebra::Path {
@@ -515,25 +579,20 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        if let Some(node) = self.flush_pending(&mut pending) {
+        if let Some(node) = self.flush_run(&mut run_start) {
             acc = Some(self.join(acc, node));
         }
+        self.scratch.items = items;
         acc.unwrap_or_else(|| self.unit())
     }
-    fn flush_pending(&mut self, pending: &mut Vec<TriplePattern>) -> Option<NodeId> {
-        if pending.is_empty() {
-            return None;
-        }
-        let start = self.q.triples.start();
-        for t in pending.drain(..) {
-            self.q.triples.push(t);
-        }
+    fn flush_run(&mut self, run_start: &mut Option<u32>) -> Option<NodeId> {
+        let start = run_start.take()?;
         let range = self.q.triples.range_from(start);
         Some(self.push_node(Algebra::Bgp(range)))
     }
     fn triples_block(&mut self) -> PResult<NodeId> {
-        let mut items = Vec::new();
-        self.triples_same_subject_path(&mut items)?;
+        self.scratch.items.clear();
+        self.triples_same_subject_path()?;
         loop {
             self.skip_trivia();
             if self.s.peek() != Some(b'.') {
@@ -544,9 +603,9 @@ impl<'a> Parser<'a> {
             if !self.starts_triples() || self.is_graph_pattern_not_triples_keyword() {
                 break;
             }
-            self.triples_same_subject_path(&mut items)?;
+            self.triples_same_subject_path()?;
         }
-        Ok(self.build_triples_node(items))
+        Ok(self.build_triples_node())
     }
 }
 
@@ -581,13 +640,21 @@ impl<'a> Parser<'a> {
             self.s.invalid("expected keyword")
         }
     }
+    /// Consumes `exprs` (typically from `Scratch::take_filters`, returned to
+    /// the free list here regardless of whether it was empty, so callers
+    /// don't need their own early-return path around that).
     fn conjoin(&mut self, exprs: Vec<ExprId>) -> Option<ExprId> {
-        let mut it = exprs.into_iter();
-        let mut acc = it.next()?;
-        for e in it {
-            acc = self.push_expr(Expr::And(acc, e));
-        }
-        Some(acc)
+        let result = if exprs.is_empty() {
+            None
+        } else {
+            let mut acc = exprs[0];
+            for &e in &exprs[1..] {
+                acc = self.push_expr(Expr::And(acc, e));
+            }
+            Some(acc)
+        };
+        self.scratch.give_filters(exprs);
+        result
     }
 
     // ---- group graph patterns ----
@@ -622,7 +689,11 @@ impl<'a> Parser<'a> {
 
     fn group_graph_pattern_sub(&mut self) -> PResult<(NodeId, Vec<ExprId>)> {
         let mut acc: Option<NodeId> = None;
-        let mut filters: Vec<ExprId> = Vec::new();
+        // Pulled from (and, via `conjoin`, returned to) the free list rather
+        // than a single slot: `FILTER EXISTS { ... }` means a group nested
+        // inside this one can need its own `filters` buffer while this
+        // frame's is still checked out — see `Scratch`'s doc comment.
+        let mut filters = self.scratch.take_filters();
         loop {
             self.skip_trivia();
             match self.s.peek() {
@@ -1434,12 +1505,17 @@ impl<'a> Parser<'a> {
     fn constraint(&mut self) -> PResult<ExprId> {
         self.expression()
     }
+    /// Its returned `Vec` is always routed through `conjoin` (see call site),
+    /// which returns it to `Scratch`'s `filters` free list — so this sources
+    /// it from that same free list via `take_filters` (even on the no-`HAVING`
+    /// path) rather than a plain `Vec::new()`, which would otherwise be a net
+    /// donation into the pool with nothing ever taking it back out.
     fn having_clause(&mut self) -> PResult<Vec<ExprId>> {
         self.skip_trivia();
         if !self.try_keyword(b"HAVING")? {
-            return Ok(Vec::new());
+            return Ok(self.scratch.take_filters());
         }
-        let mut exprs = Vec::new();
+        let mut exprs = self.scratch.take_filters();
         self.skip_trivia();
         exprs.push(self.constraint()?);
         loop {
@@ -1788,9 +1864,9 @@ impl<'a> Parser<'a> {
     fn construct_template(&mut self) -> PResult<Range> {
         self.s.expect(b'{')?;
         self.skip_trivia();
-        let mut items = Vec::new();
+        self.scratch.items.clear();
         if self.s.peek() != Some(b'}') {
-            self.triples_same_subject_path(&mut items)?;
+            self.triples_same_subject_path()?;
             loop {
                 self.skip_trivia();
                 if self.s.peek() != Some(b'.') {
@@ -1801,23 +1877,30 @@ impl<'a> Parser<'a> {
                 if self.s.peek() == Some(b'}') {
                     break;
                 }
-                self.triples_same_subject_path(&mut items)?;
+                self.triples_same_subject_path()?;
             }
         }
         self.skip_trivia();
         self.s.expect(b'}')?;
+        let items = std::mem::take(&mut self.scratch.items);
         let start = self.q.triples.start();
-        for item in items {
+        let mut path_error = false;
+        for item in items.iter().copied() {
             match item {
                 RawTriple::Simple(t) => {
                     self.q.triples.push(t);
                 }
                 RawTriple::Complex(..) => {
-                    return self
-                        .s
-                        .invalid("property paths are not allowed in a CONSTRUCT template");
+                    path_error = true;
+                    break;
                 }
             }
+        }
+        self.scratch.items = items;
+        if path_error {
+            return self
+                .s
+                .invalid("property paths are not allowed in a CONSTRUCT template");
         }
         Ok(self.q.triples.range_from(start))
     }

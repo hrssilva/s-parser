@@ -268,7 +268,16 @@ if let Algebra::Project(bgp, _vars) = data.node(root) {
 
 `parse_query` is the common case: one query already in memory, borrowed
 directly with no `Stream`/`Reader` involved (there is nothing to window — see
-below). For a file of many concatenated queries — a query log or benchmark
+below). It builds one `QueryData` arena and drops it with the `Query` that
+owns it — the same build-once-then-drop shape `QuadReader` uses for `Quad`,
+just with a heap-allocated tree instead of a fixed-size, stack-resident
+`[Token; 4]`, because unlike an N-Triples record (always exactly 4 terms) a
+SPARQL algebra tree has no fixed size to be a stack value of. Every span
+*within* that tree is still only ever `u32` offsets into the query's own
+bytes — nothing here copies query text; see `s_parser::reader::query_reader`'s
+doc comment.
+
+For a file of many concatenated queries — a query log or benchmark
 corpus — build a `QueryReader<S, T>` over any `Stream`, exactly like
 `QuadReader`:
 
