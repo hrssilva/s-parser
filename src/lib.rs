@@ -8,10 +8,10 @@ pub mod stream;
 pub mod tokenizer;
 
 pub use rdf::{Term, TermType, Token};
-pub use reader::ParseError;
 pub use reader::parallel::{ParallelReadStats, read_gzip_parallel};
 pub use reader::quad_reader::{Quad, QuadReader};
 pub use reader::query_reader::{Query, QueryReader, parse_query};
+pub use reader::{ParseError, Reader, Record, RecordReader};
 pub use sparql::SparqlTokenizer;
 pub use stream::file_stream::FileStream;
 pub use stream::gz_stream::GzStream;

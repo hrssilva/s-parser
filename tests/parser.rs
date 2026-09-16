@@ -269,6 +269,15 @@ fn empty_file_and_bounded_mapping() {
 
 #[test]
 fn invalid_decoder_cannot_stall_or_expose_out_of_bounds_tokens() {
+    // `consumed == 0` is caught unconditionally by the reader itself — that
+    // check is shape-independent, so it applies to any `Tokenizer` no matter
+    // what `Output` it produces. A token claiming a span past `consumed` is a
+    // different story: the generic reader can't inspect an arbitrary
+    // `Output`'s shape to catch that on its own, so it defers to
+    // `Tokenizer::bounds_ok` — this asserts the reader actually honors that
+    // hook rather than trusting the decoded tokens outright. `NtTokenizer`
+    // implements the real check (see its `bounds_ok`); this mock does the
+    // same to verify the reader-side wiring, not to re-test NT's own scanner.
     struct Bad(bool);
     impl Tokenizer for Bad {
         type Output = [Token; 4];
@@ -285,6 +294,9 @@ fn invalid_decoder_cannot_stall_or_expose_out_of_bounds_tokens() {
                 }
             })
         }
+        fn bounds_ok(&self, output: &[Token; 4], consumed: usize) -> bool {
+            output.iter().all(|t| t.end() <= consumed)
+        }
     }
     for bad in [true, false] {
         let mut reader = QuadReader::new(SliceStream::new(b"x", 1).unwrap(), Bad(bad));
@@ -294,6 +306,34 @@ fn invalid_decoder_cannot_stall_or_expose_out_of_bounds_tokens() {
         ));
         assert!(reader.next().unwrap().is_none());
     }
+}
+
+#[test]
+fn a_tokenizer_that_skips_bounds_ok_is_rejected_not_trusted() {
+    // The flip side of the test above, made explicit rather than left
+    // implicit: `bounds_ok`'s default is `false`, not a permissive `true` —
+    // the generic reader has no way to derive a correct check for an
+    // arbitrary `Output` shape on its own, so a `Tokenizer` that never
+    // decides is rejected outright (every record becomes a `DecoderContract`
+    // failure) rather than silently trusted. Forgetting to override this is
+    // a loud, immediate test failure, not a shipped panic risk.
+    struct Forgetful;
+    impl Tokenizer for Forgetful {
+        type Output = [Token; 4];
+        fn decode(&mut self, _: &[u8], _: bool) -> Result<Decoded, DecodeError> {
+            // A perfectly valid, in-bounds record — the point is that not
+            // overriding `bounds_ok` rejects it anyway.
+            Ok(Decoded {
+                consumed: 1,
+                tokens: Some([Token::new(TermType::DefaultGraph, 0, 0, 0).unwrap(); 4]),
+            })
+        }
+    }
+    let mut reader = QuadReader::new(SliceStream::new(b"x", 1).unwrap(), Forgetful);
+    assert!(matches!(
+        reader.next(),
+        Err(ParseError::DecoderContract { .. })
+    ));
 }
 
 #[test]

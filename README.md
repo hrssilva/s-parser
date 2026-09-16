@@ -7,16 +7,29 @@ A Rust parsing core organized around three components:
 - `Tokenizer` produces compact record metadata without owning token text. Its
   associated `Output` type keeps the mechanism independent of RDF.
 
-`QuadReader<S, T>` specializes the reader for four RDF term spans.
-`NtTokenizer` handles N-Triples, with the fourth term representing the default
-graph. `FileStream` supplies windowed file mappings; `SliceStream` borrows
-existing memory. `GzStream` incrementally decompresses gzip files or any compressed
+There is exactly one `Reader` implementation, `RecordReader<S, T>`: it owns
+the entire windowing/retry mechanism — loading `Stream` windows, retrying on
+`NeedMore`, translating decoder errors, skipping comments/blank records —
+generically over whatever a `Tokenizer` decodes. It lends `Record<'a, D>`
+(`D = T::Output`), pairing that decoded data with the exact source bytes it
+came from. Every format-specific reader in this crate is `RecordReader` under
+a `pub type` alias, not a separate implementation of that mechanism:
+`QuadReader<S, T> = RecordReader<S, T>` for N-Triples (`NtTokenizer`, four RDF
+term spans, the fourth representing the default graph) and `QueryReader<S, T>
+= RecordReader<S, T>` for SPARQL (`SparqlTokenizer`) both reuse it as-is.
+Format-specific ergonomics (`Quad::subject()`, `Query::resolve()`, ...) are
+inherent methods on `Record<'a, D>` for the concrete `D` that format's
+tokenizer produces — see `s_parser::reader`'s doc comment for the pattern. A
+Turtle reader, when implemented, is a third alias, not a fourth mechanism.
+
+`FileStream` supplies windowed file mappings; `SliceStream` borrows existing
+memory. `GzStream` incrementally decompresses gzip files or any compressed
 `Read` input. Turtle is not implemented yet.
 
-SPARQL 1.1 Query is a fourth component built on the same three: a SPARQL query
-is self-delimiting by its own grammar, the same way an N-Triples record is
-self-delimited by `.` and a line terminator, so `SparqlTokenizer` treats one
-`QueryUnit` as one record and `QueryReader<S, T>` walks a *file of many
+SPARQL 1.1 Query is a second format built on the same mechanism: a SPARQL
+query is self-delimiting by its own grammar, the same way an N-Triples record
+is self-delimited by `.` and a line terminator, so `SparqlTokenizer` treats
+one `QueryUnit` as one record and `QueryReader<S, T>` walks a *file of many
 concatenated queries* with the same bounded-window `Stream` machinery —
 `FileStream`/`GzStream` included. `parse_query` covers the common case of one
 query already in memory. Query text parses directly into a compact SPARQL

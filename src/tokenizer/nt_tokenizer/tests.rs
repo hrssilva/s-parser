@@ -83,6 +83,9 @@ fn bounded_windows_and_partitions_match_scalar_records() {
         fn decode(&mut self, bytes: &[u8], eof: bool) -> Result<Decoded> {
             decode::<false>(bytes, eof)
         }
+        fn bounds_ok(&self, output: &[Token; 4], consumed: usize) -> bool {
+            output.iter().all(|t| t.end() <= consumed)
+        }
     }
     let line = "<https://example.org/abcdefghijklmnop/é/\\u0041> <https://example.org/abcdefghijklmnop/predicate> \"🦀\"^^<https://example.org/abcdefghijklmnop/datatype>.\r\n";
     let input = format!("# header\n{}\n{}", line.repeat(3), line.trim_end());

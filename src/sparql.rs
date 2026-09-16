@@ -72,4 +72,12 @@ impl Tokenizer for SparqlTokenizer {
             }
         }
     }
+    /// `QueryData`'s spans are all `u32` offsets recorded by the scanner
+    /// during the same pass that produces `consumed` (`Span`s pushed into
+    /// its pools, never freely constructed), so a span past `consumed` is
+    /// impossible by construction — see [`term::Span`] and the arena
+    /// pools on [`algebra::QueryData`].
+    fn bounds_ok(&self, _output: &QueryData, _consumed: usize) -> bool {
+        true
+    }
 }

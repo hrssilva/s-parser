@@ -15,6 +15,9 @@ impl Tokenizer for NtTokenizer {
     fn decode(&mut self, bytes: &[u8], eof: bool) -> Result<Decoded> {
         decode::<true>(bytes, eof)
     }
+    fn bounds_ok(&self, output: &[Token; 4], consumed: usize) -> bool {
+        output.iter().all(|t| t.end() <= consumed)
+    }
 }
 
 // A compile-time switch lets tests compare the SIMD path to the same grammar
