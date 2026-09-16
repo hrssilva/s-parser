@@ -334,6 +334,69 @@ relative-IRI resolution against `BASE`, `PN_LOCAL` `\`-escape removal, and
 grammar-level arity/scope validation beyond what parsing itself requires are
 left to the caller.
 
+## Turtle
+
+```rust,no_run
+use s_parser::{SliceStream, TurtleReader, TurtleTokenizer};
+
+let src = b"@prefix ex: <http://example.org/> .
+    ex:s ex:p ex:o, [ ex:q ex:r ] .";
+let mut reader = TurtleReader::new(SliceStream::new(src, 4096)?, TurtleTokenizer::default());
+while let Some(statement) = reader.next()? {
+    std::hint::black_box(statement.triples());
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+One record here is one Turtle *statement* — a directive, or one
+`subject predicateObjectList .` after `;`/`,`-list and blank-node/collection
+expansion — the same self-delimiting-by-grammar shape a SPARQL `QueryUnit` or
+an N-Triples line has. `TurtleTokenizer` treats one statement as one record,
+so `TurtleReader` fits the same `Tokenizer` contract and the same `Stream`
+implementations as every other reader in this crate, `FileStream`/`GzStream`
+included. Like SPARQL, and for the same reason (long string literals and
+IRIREFs can legally contain raw CR/LF), `TurtleTokenizer` does not implement
+`LineTokenizer`.
+
+A statement can expand, via `;`, `,`, `[...]`, and `(...)`, into many
+triples — unlike an N-Triples record (always exactly 4 terms) or a SPARQL
+query (one arbitrarily large tree), a statement's triples have no natural
+upper bound picked by the grammar itself. Rather than a growable arena, this
+crate picks one: `s_parser::turtle::term::StatementData` holds a statement's
+triples in a fixed-size, stack-resident `[TriplePattern; MAX_TRIPLES_PER_STATEMENT]`
+(128), the tokenizer's `Output`, playing the same "compact record metadata"
+role `[Token; 4]` and `QueryData` play for the other two formats. A statement
+that would overflow it is a parse error — the same bounded-with-a-clear-error
+posture `window_size`/`RecordTooLong` already use — not unbounded growth.
+
+Turtle differs from N-Triples and SPARQL in one structural way: `@prefix` is
+scoped to the rest of the *document*, not to one statement, and blank-node
+identity (`[]`, `_:b`, list/property-list expansion) has to stay distinct
+across the whole document too. Neither can live in one statement's own
+`StatementData` the way a SPARQL query's `PREFIX`s live in that one query's
+`QueryData` — they have to outlive it. So `TurtleTokenizer` itself carries a
+small prefix-name table and a blank-node counter across every `decode` call
+for as long as the tokenizer lives. Resolving a prefixed name copies its
+(short, `@prefix`-bounded) namespace IRI into the term inline
+(`s_parser::turtle::term::Namespace`, capped at 64 bytes — a namespace
+IRI longer than that is a parse error) rather than borrowing the table or the
+declaring statement's own, possibly long-gone, window; the local part stays
+an ordinary same-statement span. This is the one place Turtle parsing
+allocates, or rather copies, at all — plain triples with no `@prefix` in
+sight allocate nothing, matching N-Triples' guarantee exactly. `turtle::Term`
+is structurally `sparql::Term` minus `Var` (Turtle has no variables), but not
+the same type, for this exact reason: a SPARQL `Iri::Prefixed` stays an
+unresolved span because the whole query (and all its `PREFIX`s) is in memory
+together, while Turtle's has to resolve immediately.
+
+Covers directives (`@prefix`/`@base`, and their SPARQL-style `PREFIX`/`BASE`
+equivalents), subjects/objects/collections/blank-node property lists,
+`a`, and the full literal grammar (typed, language-tagged, numeric, and
+boolean shorthands). Like the rest of this crate, this stays a
+lexical/structural layer: relative-IRI resolution against `BASE` and
+`PN_LOCAL` `\`-escape removal are left to the caller. Grammar reference:
+[W3C RDF 1.1 Turtle](https://www.w3.org/TR/turtle/).
+
 ## Benchmarking
 
 Performance benchmarking (throughput, memory, plain vs. gzip, serial vs.

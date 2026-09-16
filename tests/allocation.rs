@@ -1,4 +1,4 @@
-use s_parser::{NtTokenizer, QuadReader, SliceStream};
+use s_parser::{NtTokenizer, QuadReader, SliceStream, TurtleReader, TurtleTokenizer};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -84,6 +84,69 @@ fn parsing_and_window_rollovers_allocate_no_token_storage() {
     TRACK.with(|track| track.set(false));
     assert_eq!(count, 1000);
     assert_eq!(ALLOCATIONS.with(Cell::get), 0);
+}
+
+#[test]
+fn turtle_parsing_of_plain_triples_allocates_nothing() {
+    // No `@prefix` in sight, so `TurtleTokenizer`'s prefix table never grows
+    // past empty: with no growable scratch buffers in `turtle::parser`
+    // either (every triple is written straight into `StatementData`'s fixed
+    // array — see `turtle::term::MAX_TRIPLES_PER_STATEMENT`), this should
+    // match `NtTokenizer`'s zero-allocation guarantee exactly, not just
+    // bound the overhead the way the SPARQL test does.
+    let line = b"<https://example.org/abcdefghijklmnopqrstuvwxyz/subject> <urn:p> \"a\\n\"@en ; <urn:q> <urn:o> .\n";
+    let input = line.repeat(1000);
+    let mut reader = TurtleReader::new(
+        SliceStream::new(&input, line.len() + 13).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    ALLOCATIONS.with(|count| count.set(0));
+    TRACK.with(|track| track.set(true));
+    let mut count = 0;
+    while let Some(stmt) = reader.next().unwrap() {
+        std::hint::black_box(stmt.triples().len());
+        count += 1;
+    }
+    TRACK.with(|track| track.set(false));
+    assert_eq!(count, 1000);
+    assert_eq!(ALLOCATIONS.with(Cell::get), 0);
+}
+
+#[test]
+fn turtle_prefixed_names_copy_only_the_bounded_namespace() {
+    // One `@prefix` declaration (a handful of small, one-time `Vec` pushes
+    // into the tokenizer's own persistent table -- not part of the
+    // per-statement cost model) followed by many statements that each
+    // *use* the prefix. Each use copies the declared namespace into an
+    // inline `Namespace` (see `turtle::term::Namespace`) rather than
+    // allocating, so allocator activity should stay flat regardless of how
+    // many statements reuse the same prefix.
+    let mut input = Vec::from(b"@prefix ex: <http://example.org/> .\n".as_slice());
+    let line = b"ex:s ex:p ex:o .\n";
+    for _ in 0..1000 {
+        input.extend_from_slice(line);
+    }
+    let mut reader = TurtleReader::new(
+        SliceStream::new(&input, 64).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    ALLOCATIONS.with(|count| count.set(0));
+    TRACK.with(|track| track.set(true));
+    let mut count = 0;
+    while let Some(stmt) = reader.next().unwrap() {
+        std::hint::black_box(stmt.triples().len());
+        count += 1;
+    }
+    TRACK.with(|track| track.set(false));
+    assert_eq!(count, 1000);
+    // A handful of allocations for the one `@prefix` declaration itself
+    // (the tokenizer's own small `Vec<(Vec<u8>, Vec<u8>)>` table), and
+    // nothing that scales with the 1000 statements reusing it.
+    assert!(
+        ALLOCATIONS.with(Cell::get) <= 4,
+        "prefix reuse should not allocate per statement: {} allocations",
+        ALLOCATIONS.with(Cell::get)
+    );
 }
 
 #[test]

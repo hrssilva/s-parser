@@ -1,6 +1,7 @@
 pub mod parallel;
 pub mod quad_reader;
 pub mod query_reader;
+pub mod turtle_reader;
 
 use crate::stream::{SeekableStream, Stream};
 use crate::tokenizer::{DecodeError, LineTokenizer, Tokenizer};

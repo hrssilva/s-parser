@@ -6,11 +6,13 @@ pub mod reader;
 pub mod sparql;
 pub mod stream;
 pub mod tokenizer;
+pub mod turtle;
 
 pub use rdf::{Term, TermType, Token};
 pub use reader::parallel::{ParallelReadStats, read_gzip_parallel};
 pub use reader::quad_reader::{Quad, QuadReader};
 pub use reader::query_reader::{Query, QueryReader, parse_query};
+pub use reader::turtle_reader::{Statement, TurtleReader};
 pub use reader::{ParseError, Reader, Record, RecordReader};
 pub use sparql::SparqlTokenizer;
 pub use stream::file_stream::FileStream;
@@ -18,3 +20,4 @@ pub use stream::gz_stream::GzStream;
 pub use stream::{SeekableStream, SliceStream, Stream};
 pub use tokenizer::nt_tokenizer::NtTokenizer;
 pub use tokenizer::{DecodeError, Decoded, LineTokenizer, Tokenizer};
+pub use turtle::TurtleTokenizer;
