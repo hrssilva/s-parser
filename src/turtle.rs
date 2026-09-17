@@ -16,11 +16,11 @@
 //! [`TurtleTokenizer`] itself carries that state (a small prefix-name table
 //! and a blank-node counter) across every `decode` call for as long as the
 //! tokenizer lives, the same way a hand-rolled streaming parser would, while
-//! still handing back a plain `Copy`, allocation-free `StatementData` per
-//! statement: resolving a prefixed name copies its (short, `@prefix`-bounded)
-//! namespace IRI into the term inline (see [`term::Namespace`]) rather than
-//! borrowing the table or the declaring statement's own (possibly
-//! long-gone) window.
+//! still handing back a `StatementData` per statement that allocates nothing
+//! for the common case (see that type's doc comment): resolving a prefixed
+//! name copies its (short, `@prefix`-bounded) namespace IRI into the term
+//! inline (see [`term::Namespace`]) rather than borrowing the table or the
+//! declaring statement's own (possibly long-gone) window.
 //!
 //! A Turtle statement is self-delimiting by its own grammar (ends at the
 //! `.` terminating a `directive` or `triples`), the same way an N-Triples
@@ -32,14 +32,13 @@
 //! N-Triples — this tokenizer does not implement `LineTokenizer`.
 //!
 //! One statement can expand (via `;`, `,`, blank-node property lists, and
-//! collections) into many triples; [`term::StatementData`] holds them in a
-//! fixed-size, stack-resident buffer bounded by
-//! [`term::MAX_TRIPLES_PER_STATEMENT`] rather than a growable arena — a
-//! statement that would overflow it is a parse error (the same
-//! bounded-with-a-clear-error posture `window_size`/`RecordTooLong` already
-//! use), not unbounded growth. Consistent with the rest of this crate, this
-//! stays a lexical/structural layer: relative-IRI resolution against `BASE`
-//! and `PN_LOCAL` escape removal are left to the caller.
+//! collections) into many triples; [`term::StatementData`] holds a small
+//! number of them inline with no allocation and spills the rest into a
+//! `Vec` only when a statement genuinely needs it — see that type's doc
+//! comment for why this isn't a fixed, error-on-overflow bound the way
+//! `window_size`/`RecordTooLong` is. Consistent with the rest of this crate,
+//! this stays a lexical/structural layer: relative-IRI resolution against
+//! `BASE` and `PN_LOCAL` escape removal are left to the caller.
 mod lexer;
 mod parser;
 pub mod term;

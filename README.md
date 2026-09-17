@@ -361,13 +361,15 @@ IRIREFs can legally contain raw CR/LF), `TurtleTokenizer` does not implement
 A statement can expand, via `;`, `,`, `[...]`, and `(...)`, into many
 triples — unlike an N-Triples record (always exactly 4 terms) or a SPARQL
 query (one arbitrarily large tree), a statement's triples have no natural
-upper bound picked by the grammar itself. Rather than a growable arena, this
-crate picks one: `s_parser::turtle::term::StatementData` holds a statement's
-triples in a fixed-size, stack-resident `[TriplePattern; MAX_TRIPLES_PER_STATEMENT]`
-(128), the tokenizer's `Output`, playing the same "compact record metadata"
-role `[Token; 4]` and `QueryData` play for the other two formats. A statement
-that would overflow it is a parse error — the same bounded-with-a-clear-error
-posture `window_size`/`RecordTooLong` already use — not unbounded growth.
+upper bound picked by the grammar itself, and real Turtle (a manifest's
+`mf:entries (...)` collection, a long object list) can need far more than a
+handful. `s_parser::turtle::term::StatementData` holds up to 16 triples
+inline with no allocation — real statements are overwhelmingly this small —
+and spills any more into a heap `Vec` rather than erroring, so unlike
+`window_size`/`RecordTooLong` there's no fixed cap a legitimate document can
+run into. `StatementData` is the tokenizer's `Output`, playing the same
+"compact record metadata" role `[Token; 4]` and `QueryData` play for the
+other two formats.
 
 Turtle differs from N-Triples and SPARQL in one structural way: `@prefix` is
 scoped to the rest of the *document*, not to one statement, and blank-node
@@ -381,10 +383,12 @@ for as long as the tokenizer lives. Resolving a prefixed name copies its
 (`s_parser::turtle::term::Namespace`, capped at 64 bytes — a namespace
 IRI longer than that is a parse error) rather than borrowing the table or the
 declaring statement's own, possibly long-gone, window; the local part stays
-an ordinary same-statement span. This is the one place Turtle parsing
-allocates, or rather copies, at all — plain triples with no `@prefix` in
-sight allocate nothing, matching N-Triples' guarantee exactly. `turtle::Term`
-is structurally `sparql::Term` minus `Var` (Turtle has no variables), but not
+an ordinary same-statement span. Between that and the inline/spill triple
+buffer above, an ordinary statement — no `@prefix` use, at most 16
+triples, which covers the overwhelming majority of real Turtle — allocates
+nothing at all, matching N-Triples' guarantee exactly; only an unusually
+wide statement or a prefixed name pushes it past that. `turtle::Term` is
+structurally `sparql::Term` minus `Var` (Turtle has no variables), but not
 the same type, for this exact reason: a SPARQL `Iri::Prefixed` stays an
 unresolved span because the whole query (and all its `PREFIX`s) is in memory
 together, while Turtle's has to resolve immediately.

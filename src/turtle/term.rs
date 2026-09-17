@@ -183,49 +183,100 @@ pub enum Term {
     Numeric(NumKind, Span),
     Boolean(bool),
 }
-// An arbitrary placeholder, never semantically meaningful: only used to
-// fill `Statement`'s fixed-size triple buffer before real triples overwrite
-// its live prefix — see `MAX_TRIPLES_PER_STATEMENT`.
-impl Default for Term {
-    fn default() -> Self {
-        Self::Boolean(false)
-    }
-}
-
 /// One decoded triple. `subject`/`predicate`/`object` spans are relative to
 /// the statement (record) they came from — see [`StatementData`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TriplePattern {
     pub subject: Term,
     pub predicate: Term,
     pub object: Term,
 }
 
-/// The most triples one Turtle statement (`;`/`,`-lists, `[...]`, `(...)`,
-/// arbitrarily nested) can produce. A fixed bound, not a growable one — the
-/// same bounded-with-a-clear-error posture as `window_size`/`RecordTooLong`
-/// — is what lets [`StatementData`] stay a plain stack value with no
-/// allocation of its own, matching [`crate::rdf::Token`]'s guarantee for
-/// N-Triples instead of needing a separate growable arena the way SPARQL's
-/// algebra tree does (SPARQL has no such bound to pick — an expression tree
-/// isn't "a list of triples" with one natural per-item cost to multiply).
-pub const MAX_TRIPLES_PER_STATEMENT: usize = 128;
+/// How many triples one Turtle statement holds inline, with no allocation —
+/// a tuning knob, not a correctness bound: real statements (`;`/`,`-lists,
+/// `[...]`, `(...)`) are overwhelmingly small (a handful of predicates on
+/// one subject), so this covers the common case for free, matching
+/// [`crate::rdf::Token`]'s zero-allocation guarantee for N-Triples. A
+/// statement producing more spills the *rest* into a heap `Vec` (see
+/// [`StatementData`]) rather than erroring — unlike a `Stream` window (where
+/// `RecordTooLong` is the right answer, since growing the window costs
+/// memory proportional to the whole file), a handful of extra triples in
+/// one statement is cheap and unbounded is the more honest contract: a
+/// document with a long `owl:oneOf`/collection, or a manifest listing
+/// dozens of entries as one subject's object list, is ordinary Turtle, not
+/// a pathological input.
+const INLINE_TRIPLES: usize = 16;
 
 /// One parsed Turtle statement's triples — [`crate::tokenizer::Tokenizer::Output`]
 /// for [`super::TurtleTokenizer`], playing the same "compact record
 /// metadata" role `[Token; 4]` plays for one N-Triples record (and `QueryData`
-/// plays for one SPARQL query), sized for a *statement* (which can be many
-/// triples) instead of fixed at one. Named `...Data` rather than `Statement`
-/// for the same reason `sparql::algebra::QueryData` is: the reader-facing
+/// plays for one SPARQL query). Named `...Data` rather than `Statement` for
+/// the same reason `sparql::algebra::QueryData` is: the reader-facing
 /// lending type — [`crate::reader::turtle_reader::Statement`] — is what
 /// callers actually hold.
-#[derive(Clone, Copy, Debug)]
-pub struct StatementData {
-    pub(super) triples: [TriplePattern; MAX_TRIPLES_PER_STATEMENT],
-    pub(super) len: u16,
+///
+/// Holds up to [`INLINE_TRIPLES`] triples inline with no allocation
+/// (`MaybeUninit`, not eagerly initialized — the earlier fixed-size,
+/// `Default`-filled array this replaced paid an unconditional ~32KB
+/// stack-write on every statement regardless of its actual size, which
+/// measurably dominated small-statement throughput); a statement needing
+/// more spills into a `Vec`, copying the already-written inline entries
+/// over once, the same "small inline buffer, rare spill" trade-off a
+/// `SmallVec` makes, hand-rolled here rather than pulling in that
+/// dependency for one call site.
+pub struct StatementData(Triples);
+// The size gap between variants is the entire point: `Inline` holding its
+// bytes directly, not through a `Box`, is what makes the common case
+// allocation-free. Boxing it (clippy's usual suggestion here) would force a
+// heap allocation on every statement, defeating the reason this type exists.
+#[allow(clippy::large_enum_variant)]
+enum Triples {
+    Inline([std::mem::MaybeUninit<TriplePattern>; INLINE_TRIPLES], u8),
+    Spilled(Vec<TriplePattern>),
 }
 impl StatementData {
+    pub(super) fn new() -> Self {
+        Self(Triples::Inline(
+            [const { std::mem::MaybeUninit::uninit() }; INLINE_TRIPLES],
+            0,
+        ))
+    }
+    pub(super) fn push(&mut self, t: TriplePattern) {
+        match &mut self.0 {
+            Triples::Inline(buf, len) if (*len as usize) < INLINE_TRIPLES => {
+                buf[*len as usize].write(t);
+                *len += 1;
+            }
+            Triples::Inline(buf, len) => {
+                let mut spilled = Vec::with_capacity(INLINE_TRIPLES * 2);
+                // SAFETY: entries `0..*len` were written by the `write`
+                // call above, once each, and never read before now.
+                spilled.extend(
+                    buf[..*len as usize]
+                        .iter()
+                        .map(|slot| unsafe { slot.assume_init() }),
+                );
+                spilled.push(t);
+                self.0 = Triples::Spilled(spilled);
+            }
+            Triples::Spilled(v) => v.push(t),
+        }
+    }
     pub fn triples(&self) -> &[TriplePattern] {
-        &self.triples[..self.len as usize]
+        match &self.0 {
+            // SAFETY: entries `0..*len` were written by `push` above, and
+            // `MaybeUninit<T>` has the same layout as `T`.
+            Triples::Inline(buf, len) => unsafe {
+                std::slice::from_raw_parts(buf.as_ptr().cast::<TriplePattern>(), *len as usize)
+            },
+            Triples::Spilled(v) => v.as_slice(),
+        }
+    }
+}
+impl std::fmt::Debug for StatementData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StatementData")
+            .field(&self.triples())
+            .finish()
     }
 }

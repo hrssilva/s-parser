@@ -89,11 +89,12 @@ fn parsing_and_window_rollovers_allocate_no_token_storage() {
 #[test]
 fn turtle_parsing_of_plain_triples_allocates_nothing() {
     // No `@prefix` in sight, so `TurtleTokenizer`'s prefix table never grows
-    // past empty: with no growable scratch buffers in `turtle::parser`
-    // either (every triple is written straight into `StatementData`'s fixed
-    // array — see `turtle::term::MAX_TRIPLES_PER_STATEMENT`), this should
-    // match `NtTokenizer`'s zero-allocation guarantee exactly, not just
-    // bound the overhead the way the SPARQL test does.
+    // past empty, and each statement here has only 2 triples -- well under
+    // `StatementData`'s no-allocation inline threshold (16, see
+    // `turtle::term::StatementData`), so every triple is written straight
+    // into that inline buffer. This should match `NtTokenizer`'s
+    // zero-allocation guarantee exactly, not just bound the overhead the
+    // way the SPARQL test does.
     let line = b"<https://example.org/abcdefghijklmnopqrstuvwxyz/subject> <urn:p> \"a\\n\"@en ; <urn:q> <urn:o> .\n";
     let input = line.repeat(1000);
     let mut reader = TurtleReader::new(
@@ -146,6 +147,37 @@ fn turtle_prefixed_names_copy_only_the_bounded_namespace() {
         ALLOCATIONS.with(Cell::get) <= 4,
         "prefix reuse should not allocate per statement: {} allocations",
         ALLOCATIONS.with(Cell::get)
+    );
+}
+
+#[test]
+fn turtle_statement_wider_than_inline_capacity_spills_exactly_once() {
+    // A statement past `StatementData`'s inline-with-no-allocation
+    // threshold does allocate -- this is the deliberate trade-off from
+    // `turtle_parsing_of_plain_triples_allocates_nothing`'s guarantee, not a
+    // bug: the spill should still be one `Vec` allocation (plus its own
+    // regrowth as more triples than the initial spill capacity arrive), not
+    // one allocation per triple.
+    let mut src = String::from("<urn:s>");
+    for i in 0..300 {
+        src.push_str(&format!(" <urn:p{i}> <urn:o{i}> ;"));
+    }
+    src.push_str(" <urn:pLast> <urn:oLast> .");
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src.as_bytes(), src.len() + 16).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    ALLOCATIONS.with(|count| count.set(0));
+    TRACK.with(|track| track.set(true));
+    let stmt = reader.next().unwrap().unwrap();
+    let triples = stmt.triples().len();
+    TRACK.with(|track| track.set(false));
+    assert_eq!(triples, 301);
+    assert!(
+        ALLOCATIONS.with(Cell::get) <= 8,
+        "expected a small, bounded number of spill allocations (`Vec` regrowth), not one per triple: {} allocations for {} triples",
+        ALLOCATIONS.with(Cell::get),
+        triples
     );
 }
 

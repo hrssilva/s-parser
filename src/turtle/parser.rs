@@ -2,13 +2,14 @@
 //! [`super::lexer::Scanner`] the same way `sparql::parser`/`nt_tokenizer`
 //! drive their own scanners. Parses exactly one statement per call — a
 //! directive (which updates the tokenizer's persistent prefix table and
-//! produces no triples) or a triples statement (built into a fixed-size
-//! [`TriplePattern`] buffer, this crate's answer to "how many triples can one
-//! statement expand to" — see [`MAX_TRIPLES_PER_STATEMENT`]).
+//! produces no triples) or a triples statement (built directly into
+//! [`StatementData`], this crate's answer to "how many triples can one
+//! statement expand to": inline up to a small threshold, unbounded beyond
+//! it — see that type's doc comment).
 use super::lexer::Scanner;
 use super::term::{
-    BlankNode, Iri, LiteralSuffix, MAX_TRIPLES_PER_STATEMENT, Namespace, RdfLiteral, Span,
-    StatementData, Term, TriplePattern, WellKnown,
+    BlankNode, Iri, LiteralSuffix, Namespace, RdfLiteral, Span, StatementData, Term, TriplePattern,
+    WellKnown,
 };
 use crate::tokenizer::DecodeError;
 
@@ -30,8 +31,7 @@ pub(super) struct Parser<'a, 'p> {
     s: Scanner<'a>,
     prefixes: &'p mut Vec<(Vec<u8>, Vec<u8>)>,
     blank_counter: &'p mut u32,
-    triples: [TriplePattern; MAX_TRIPLES_PER_STATEMENT],
-    len: u16,
+    triples: StatementData,
 }
 
 impl<'a, 'p> Parser<'a, 'p> {
@@ -45,8 +45,7 @@ impl<'a, 'p> Parser<'a, 'p> {
             s: Scanner::new(bytes, eof),
             prefixes,
             blank_counter,
-            triples: [TriplePattern::default(); MAX_TRIPLES_PER_STATEMENT],
-            len: 0,
+            triples: StatementData::new(),
         }
     }
     fn skip_trivia(&mut self) {
@@ -57,15 +56,8 @@ impl<'a, 'p> Parser<'a, 'p> {
         *self.blank_counter += 1;
         Term::Blank(BlankNode::Anonymous(id))
     }
-    fn emit(&mut self, t: TriplePattern) -> PResult<()> {
-        if self.len as usize >= MAX_TRIPLES_PER_STATEMENT {
-            return self
-                .s
-                .invalid("statement produces too many triples for one window");
-        }
-        self.triples[self.len as usize] = t;
-        self.len += 1;
-        Ok(())
+    fn emit(&mut self, t: TriplePattern) {
+        self.triples.push(t);
     }
 
     /// A complete identifier-shaped word at the current position, or `None`
@@ -227,7 +219,7 @@ impl<'a, 'p> Parser<'a, 'p> {
                 subject,
                 predicate,
                 object,
-            })?;
+            });
             self.skip_trivia();
             if self.s.peek() == Some(b',') {
                 self.s.pos += 1;
@@ -236,22 +228,30 @@ impl<'a, 'p> Parser<'a, 'p> {
             }
         }
     }
+    /// `predicateObjectList ::= verb objectList (';' (verb objectList)?)*`.
+    /// The `verb objectList` after each `;` is itself optional, so `;;` and a
+    /// trailing `;` right before the statement's `.` are both legal — a
+    /// no-op semicolon, not an error — which is why this can't just stop the
+    /// first time no verb follows a `;`: another `;` (with or without its
+    /// own `verb objectList`) may still come after it.
     fn property_list_not_empty(&mut self, subject: Term) -> PResult<()> {
+        self.skip_trivia();
+        let predicate = self.verb()?;
+        self.skip_trivia();
+        self.object_list(subject, predicate)?;
         loop {
             self.skip_trivia();
+            if self.s.peek() != Some(b';') {
+                return Ok(());
+            }
+            self.s.pos += 1;
+            self.skip_trivia();
+            if !self.starts_verb() {
+                continue;
+            }
             let predicate = self.verb()?;
             self.skip_trivia();
             self.object_list(subject, predicate)?;
-            self.skip_trivia();
-            if self.s.peek() == Some(b';') {
-                self.s.pos += 1;
-                self.skip_trivia();
-                if !self.starts_verb() {
-                    return Ok(());
-                }
-            } else {
-                return Ok(());
-            }
         }
     }
     /// `'[' predicateObjectList ']'`, or `ANON` (`[]`, no properties) —
@@ -297,12 +297,12 @@ impl<'a, 'p> Parser<'a, 'p> {
                 subject: cur,
                 predicate: Term::Iri(Iri::WellKnown(WellKnown::RdfFirst)),
                 object: el,
-            })?;
+            });
             self.emit(TriplePattern {
                 subject: cur,
                 predicate: Term::Iri(Iri::WellKnown(WellKnown::RdfRest)),
                 object: rest,
-            })?;
+            });
             if is_last {
                 self.s.pos += 1;
                 break;
@@ -424,10 +424,6 @@ impl<'a, 'p> Parser<'a, 'p> {
             return Ok((None, self.s.pos));
         }
         self.triples_statement()?;
-        let statement = StatementData {
-            triples: self.triples,
-            len: self.len,
-        };
-        Ok((Some(statement), self.s.pos))
+        Ok((Some(self.triples), self.s.pos))
     }
 }

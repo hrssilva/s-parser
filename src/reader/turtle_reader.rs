@@ -8,13 +8,14 @@
 //! describes. `StatementData` plays the same role `[Token; 4]` plays for
 //! N-Triples and `QueryData` plays for one SPARQL query: the tokenizer's
 //! compact per-record output, built once and dropped with the `Statement`
-//! that owns it. Unlike either of those, it's a fixed-size (not growable)
-//! stack array — see `turtle::term::MAX_TRIPLES_PER_STATEMENT` — since a
-//! statement, unlike a whole query, has one natural per-item cost (one
-//! triple) to bound. Every span it holds is still only ever a `u32` offset
-//! into this statement's own bytes, except a resolved prefixed name's
-//! namespace, which is a small inline copy — see `turtle::term::Namespace`
-//! for why that one piece can't stay a same-statement span.
+//! that owns it. Unlike `[Token; 4]`, it holds a variable number of triples
+//! — a small number inline with no allocation, spilling into a heap `Vec`
+//! only for a statement large enough to need it, rather than a fixed bound
+//! (see `turtle::term::StatementData`'s doc comment). Every span it holds is
+//! still only ever a `u32` offset into this statement's own bytes, except a
+//! resolved prefixed name's namespace, which is a small inline copy — see
+//! `turtle::term::Namespace` for why that one piece can't stay a
+//! same-statement span.
 use super::{Record, RecordReader};
 use crate::turtle::TurtleTokenizer;
 use crate::turtle::term::{StatementData, TriplePattern};

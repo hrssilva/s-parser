@@ -1,4 +1,4 @@
-use s_parser::turtle::term::{BlankNode, Iri, LiteralSuffix, Term, WellKnown};
+use s_parser::turtle::term::{BlankNode, Iri, LiteralSuffix, NumKind, Term, WellKnown};
 use s_parser::{ParseError, SliceStream, TurtleReader, TurtleTokenizer};
 
 fn collect(data: &[u8], window: usize) -> Result<Vec<Vec<u8>>, ParseError> {
@@ -273,7 +273,108 @@ fn literals_with_lang_and_datatype_and_numerics_and_booleans() {
 }
 
 #[test]
-fn statement_too_large_is_a_clear_error() {
+fn repeated_and_trailing_semicolons_are_legal_noop_entries() {
+    // `predicateObjectList ::= verb objectList (';' (verb objectList)?)*`:
+    // the `verb objectList` after each `;` is itself optional, so a doubled
+    // `;;` (and a `;` right before the closing `.`) is a legal no-op entry,
+    // not an error -- these four are W3C `TestTurtlePositiveSyntax`/
+    // `TestTurtleEval` fixtures (`repeated_semis_at_end.ttl`,
+    // `repeated_semis_not_at_end.ttl`, `turtle-syntax-struct-04/05.ttl`).
+    let src = b"<urn:s> <urn:p1> <urn:o1>;; <urn:p2> <urn:o2> .";
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src, 256).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    let stmt = reader.next().unwrap().unwrap();
+    assert_eq!(stmt.triples().len(), 2);
+    assert!(reader.next().unwrap().is_none());
+
+    let src = b"<urn:s> <urn:p1> <urn:o1>;; .";
+    let records = collect(src, 256).unwrap();
+    assert_eq!(records.len(), 1);
+
+    let src = b"@prefix : <http://example.org/> .\n:s :p1 :o1 ;;\n   :p2 :o2\n   .";
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src, 256).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    let stmt = reader.next().unwrap().unwrap();
+    assert_eq!(stmt.triples().len(), 2);
+
+    let src = b"@prefix : <http://example.org/> .\n:s :p1 :o1 ;\n   :p2 :o2 ;;\n   .";
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src, 256).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    let stmt = reader.next().unwrap().unwrap();
+    assert_eq!(stmt.triples().len(), 2);
+}
+
+#[test]
+fn a_lone_trailing_semicolon_at_eof_is_still_an_error() {
+    // Unlike the no-op-entry cases above, a `;` with nothing after it at
+    // all (not even the statement's own `.`) is genuinely incomplete —
+    // `turtle-syntax-bad-struct-11.ttl`.
+    let src = b"<urn:s> <urn:p> <urn:o> ;";
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src, 256).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    assert!(reader.next().is_err());
+}
+
+#[test]
+fn integer_immediately_followed_by_statement_terminator() {
+    // `DECIMAL ::= [0-9]* '.' [0-9]+` requires a fraction digit, so `123.`
+    // is the integer `123` followed by the statement-terminating `.`, not a
+    // truncated decimal -- `turtle-syntax-number-08.ttl`.
+    let src = b"<urn:s> <urn:p> 123.";
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src, 256).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    let stmt = reader.next().unwrap().unwrap();
+    let Term::Numeric(NumKind::Integer, span) = stmt.triples()[0].object else {
+        panic!("expected an integer object")
+    };
+    assert_eq!(span.text(stmt.bytes()), b"123");
+    assert!(reader.next().unwrap().is_none());
+}
+
+#[test]
+fn decimal_and_double_still_parse_correctly_around_the_dot() {
+    // Regression guard alongside the fix above: an actual fraction digit
+    // (or a `DOUBLE` with a zero-digit fraction followed by an exponent)
+    // must still be recognized as part of the number, not split off.
+    let src = b"<urn:s> <urn:p1> 1.5 ; <urn:p2> 1.e10 ; <urn:p3> .5 .";
+    let mut reader = TurtleReader::new(
+        SliceStream::new(src, 256).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    let stmt = reader.next().unwrap().unwrap();
+    let triples = stmt.triples();
+    assert_eq!(triples.len(), 3);
+    let Term::Numeric(NumKind::Decimal, span) = triples[0].object else {
+        panic!("expected a decimal")
+    };
+    assert_eq!(span.text(stmt.bytes()), b"1.5");
+    let Term::Numeric(NumKind::Double, span) = triples[1].object else {
+        panic!("expected a double")
+    };
+    assert_eq!(span.text(stmt.bytes()), b"1.e10");
+    let Term::Numeric(NumKind::Decimal, span) = triples[2].object else {
+        panic!("expected a decimal")
+    };
+    assert_eq!(span.text(stmt.bytes()), b".5");
+}
+
+#[test]
+fn wide_statements_spill_past_the_inline_buffer_without_erroring() {
+    // A statement well past `StatementData`'s inline-with-no-allocation
+    // threshold (16) -- real documents produce this shape from a long
+    // object list or a manifest's `mf:entries (...)` collection, so this
+    // must succeed, not hit a fixed cap the way an oversized `Stream`
+    // window does.
     let mut src = String::from("<urn:s>");
     for i in 0..200 {
         src.push_str(&format!(" <urn:p{i}> <urn:o{i}> ;"));
@@ -283,10 +384,17 @@ fn statement_too_large_is_a_clear_error() {
         SliceStream::new(src.as_bytes(), src.len() + 16).unwrap(),
         TurtleTokenizer::default(),
     );
-    match reader.next() {
-        Err(ParseError::Syntax { .. }) => {}
-        other => panic!("expected an overflow syntax error, got {other:?}"),
-    }
+    let stmt = reader.next().unwrap().unwrap();
+    assert_eq!(stmt.triples().len(), 201);
+    let Term::Iri(Iri::Full(p)) = stmt.triples()[0].predicate else {
+        panic!()
+    };
+    assert_eq!(p.text(stmt.bytes()), b"urn:p0");
+    let Term::Iri(Iri::Full(p)) = stmt.triples()[200].predicate else {
+        panic!()
+    };
+    assert_eq!(p.text(stmt.bytes()), b"urn:pLast");
+    assert!(reader.next().unwrap().is_none());
 }
 
 #[test]

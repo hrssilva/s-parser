@@ -394,17 +394,46 @@ impl<'a> Scanner<'a> {
         if matches!(self.bytes.get(p), Some(b'+' | b'-')) {
             p += 1;
         }
-        if !matches!(self.bytes.get(p), Some(b) if b.is_ascii_digit() || *b == b'.') {
-            return Ok(None);
+        match self.bytes.get(p) {
+            Some(b) if b.is_ascii_digit() || *b == b'.' => {}
+            Some(_) => return Ok(None),
+            // A lone sign right at the window's end: more input could still
+            // turn this into a number (or rule it out) — the same
+            // "never guess this close to a boundary" contract `scan_digits`
+            // enforces below.
+            None if p > self.pos && !self.eof => return Err(DecodeError::NeedMore),
+            None => return Ok(None),
         }
         self.pos = p;
-        self.scan_digits()?;
-        let mut frac_digits = 0u32;
+        let int_digits = self.scan_digits()?;
         let mut has_dot = false;
+        // `DECIMAL ::= [0-9]* '.' [0-9]+` needs at least one fraction digit;
+        // `DOUBLE`'s `[0-9]+ '.' [0-9]* EXPONENT` allows zero only when an
+        // EXPONENT follows. So a `.` is only part of the number when a digit
+        // or an exponent marker follows it — otherwise it's some other
+        // token (typically the statement-terminating `.`), not a decimal
+        // point: `123.` is the integer `123` followed by `.`, not a
+        // truncated decimal. At a window boundary where what follows the
+        // `.` isn't known yet, more input is needed before deciding either
+        // way, rather than guessing.
         if self.peek() == Some(b'.') {
-            has_dot = true;
-            self.pos += 1;
-            frac_digits = self.scan_digits()?;
+            match self.peek_at(1) {
+                Some(b) if b.is_ascii_digit() || matches!(b, b'e' | b'E') => {
+                    has_dot = true;
+                    self.pos += 1;
+                    self.scan_digits()?;
+                }
+                Some(_) => {}
+                None if self.eof => {}
+                None => return Err(DecodeError::NeedMore),
+            }
+        }
+        if int_digits == 0 && !has_dot {
+            // Neither an integer digit run nor a decimal point was actually
+            // consumed (e.g. a lone '.' not followed by a digit or
+            // exponent): not a numeric literal at all.
+            self.pos = start;
+            return Ok(None);
         }
         let has_exp = matches!(self.peek(), Some(b'e' | b'E'));
         if has_exp {
@@ -419,9 +448,6 @@ impl<'a> Scanner<'a> {
         let kind = if has_exp {
             NumKind::Double
         } else if has_dot {
-            if frac_digits == 0 {
-                return self.invalid("expected digits after decimal point");
-            }
             NumKind::Decimal
         } else {
             NumKind::Integer
