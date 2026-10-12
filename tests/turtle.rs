@@ -13,9 +13,11 @@ fn collect(data: &[u8], window: usize) -> Result<Vec<Vec<u8>>, ParseError> {
     Ok(records)
 }
 
-fn iri_text<'a>(iri: Iri, record: &'a [u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
+fn iri_text<'a>(iri: &'a Iri, record: &'a [u8], buf: &'a mut Vec<u8>) -> &'a [u8] {
     buf.clear();
-    iri.write_to(record, buf);
+    let (a, b) = iri.resolve(record).parts();
+    buf.extend_from_slice(a);
+    buf.extend_from_slice(b);
     buf.as_slice()
 }
 
@@ -51,7 +53,7 @@ fn prefix_directive_produces_no_record_and_resolves_later() {
     };
     let mut buf = Vec::new();
     assert_eq!(
-        iri_text(iri, stmt.bytes(), &mut buf),
+        iri_text(&iri, stmt.bytes(), &mut buf),
         b"http://example.org/s"
     );
     assert!(reader.next().unwrap().is_none());
@@ -70,7 +72,7 @@ fn empty_prefix_resolves() {
     };
     let mut buf = Vec::new();
     assert_eq!(
-        iri_text(iri, stmt.bytes(), &mut buf),
+        iri_text(&iri, stmt.bytes(), &mut buf),
         b"http://example.org/p"
     );
 }
@@ -94,13 +96,13 @@ fn prefix_redeclared_later_in_document() {
         panic!()
     };
     let mut buf = Vec::new();
-    assert_eq!(iri_text(iri, first.bytes(), &mut buf), b"http://a.org/s");
+    assert_eq!(iri_text(&iri, first.bytes(), &mut buf), b"http://a.org/s");
 
     let second = reader.next().unwrap().unwrap();
     let Term::Iri(iri) = second.triples()[0].subject else {
         panic!()
     };
-    assert_eq!(iri_text(iri, second.bytes(), &mut buf), b"http://b.org/s2");
+    assert_eq!(iri_text(&iri, second.bytes(), &mut buf), b"http://b.org/s2");
 }
 
 #[test]

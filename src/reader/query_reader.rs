@@ -29,9 +29,10 @@
 //! `u32` offsets into the query's own bytes, the same borrowing discipline
 //! `rdf::Token` uses; nothing here copies query text.
 use super::{ParseError, Record, RecordReader};
+use crate::rdf::ResolvedIri;
 use crate::sparql::SparqlTokenizer;
 use crate::sparql::algebra::QueryData;
-use crate::sparql::term::{Iri, ResolvedIri};
+use crate::sparql::term::Iri;
 use crate::tokenizer::{DecodeError, Tokenizer};
 
 pub type QueryReader<S, T = SparqlTokenizer> = RecordReader<S, T>;

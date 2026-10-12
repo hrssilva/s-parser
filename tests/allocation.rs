@@ -1,4 +1,7 @@
-use s_parser::{NtTokenizer, QuadReader, SliceStream, TurtleReader, TurtleTokenizer};
+use s_parser::{
+    NtTokenizer, NtWriter, QuadReader, SliceStream, TurtleReader, TurtleTokenizer,
+    turtle_to_ntriples,
+};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -178,6 +181,42 @@ fn turtle_statement_wider_than_inline_capacity_spills_exactly_once() {
         "expected a small, bounded number of spill allocations (`Vec` regrowth), not one per triple: {} allocations for {} triples",
         ALLOCATIONS.with(Cell::get),
         triples
+    );
+}
+
+#[test]
+fn turtle_to_ntriples_conversion_does_not_copy_term_text() {
+    // Resolving a term (`Term::resolve`) only ever builds byte-slice
+    // references (`ResolvedTerm`/`ResolvedIri` hold `&[u8]`, never `Vec`/
+    // `String`), and `NtWriter` streams straight from those into the sink
+    // via `write_all` -- no intermediate buffer joins a prefixed IRI's two
+    // pieces, and no per-term allocation happens on the resolve side at
+    // all. Pre-reserving the output `Vec` rules out its own growth, so the
+    // only allocations left should be the *one-time* cost of the single
+    // `@prefix` declaration's own table entry (see
+    // `turtle_prefixed_names_copy_only_the_bounded_namespace`), not
+    // anything that scales with the 500 statements reusing it.
+    let line = b"@prefix ex: <http://example.org/a/fairly/long/namespace#> .\n";
+    let mut input = Vec::from(line.as_slice());
+    let stmt = b"ex:s ex:p ex:o, \"literal value\"@en ; ex:q 42 .\n";
+    for _ in 0..500 {
+        input.extend_from_slice(stmt);
+    }
+    let mut reader = TurtleReader::new(
+        SliceStream::new(&input, line.len() + stmt.len() + 16).unwrap(),
+        TurtleTokenizer::default(),
+    );
+    let mut out = Vec::with_capacity(1 << 20);
+    ALLOCATIONS.with(|count| count.set(0));
+    TRACK.with(|track| track.set(true));
+    let mut writer = NtWriter::new(&mut out);
+    turtle_to_ntriples(&mut reader, &mut writer).unwrap();
+    TRACK.with(|track| track.set(false));
+    assert!(!out.is_empty());
+    assert!(
+        ALLOCATIONS.with(Cell::get) <= 4,
+        "expected only the one-time @prefix bookkeeping cost, nothing scaling with 500 statements: {} allocations",
+        ALLOCATIONS.with(Cell::get)
     );
 }
 

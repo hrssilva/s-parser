@@ -2,6 +2,7 @@
 //! allocates or unescapes. Prefixed names keep their prefix and local spans
 //! apart instead of concatenating them, so resolving one costs no allocation
 //! either — see [`Prologue::resolve`].
+use crate::rdf::ResolvedIri;
 use std::ops::Range as StdRange;
 
 /// A byte range in the query source. Query documents are expected to be at
@@ -133,26 +134,6 @@ pub struct Prologue {
     /// `(prefix, namespace-iri)` pairs in declaration order; a later
     /// declaration of the same prefix shadows earlier ones on lookup.
     pub prefixes: Vec<(Span, Span)>,
-}
-
-/// The two source slices that make up a resolved `Iri::Prefixed`, handed
-/// back unjoined so resolving a prefixed name never allocates. Concatenate
-/// them (after removing any `PN_LOCAL` `\`-escapes from the local part, if
-/// the caller cares about the exact IRI) to get the full IRI text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResolvedIri<'s> {
-    Direct(&'s [u8]),
-    Joined(&'s [u8], &'s [u8]),
-}
-impl<'s> ResolvedIri<'s> {
-    /// The two slices to write in order to reconstruct the full IRI text
-    /// (without escape removal — see the type-level note).
-    pub fn parts(self) -> (&'s [u8], &'s [u8]) {
-        match self {
-            Self::Direct(s) => (s, b""),
-            Self::Joined(ns, local) => (ns, local),
-        }
-    }
 }
 
 impl Prologue {

@@ -401,6 +401,52 @@ lexical/structural layer: relative-IRI resolution against `BASE` and
 `PN_LOCAL` `\`-escape removal are left to the caller. Grammar reference:
 [W3C RDF 1.1 Turtle](https://www.w3.org/TR/turtle/).
 
+## Converting between formats
+
+```rust,no_run
+use s_parser::{NtWriter, SliceStream, TurtleReader, TurtleTokenizer, turtle_to_ntriples};
+
+let src = b"@prefix ex: <http://example.org/> . ex:s ex:p ex:o, 42 .";
+let mut reader = TurtleReader::new(SliceStream::new(src, 4096)?, TurtleTokenizer::default());
+let mut writer = NtWriter::new(std::io::stdout());
+turtle_to_ntriples(&mut reader, &mut writer)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`NtWriter<W: io::Write>` is the write-side counterpart to `Reader` — simpler,
+deliberately: writing has no equivalent of a `Stream` window running short
+mid-record (a resolved triple is always fully in hand), so there's no
+windowing/`NeedMore` machinery to mirror, just `write_statement(subject,
+predicate, object, graph)` per triple. Since valid N-Triples is already
+valid Turtle, `NtWriter` doubles as "convert to Turtle" for now; a
+prettifying writer (prefix substitution, `;`/`,` grouping by subject) is a
+distinct, heavier feature — it needs to buffer and compare adjacent
+subjects — left for later.
+
+The shared currency between any reader format's own term type and any
+writer is `s_parser::ResolvedTerm`: IRIs, blank nodes, and literals fully
+resolved and ready to serialize, still borrowing rather than copying (a
+resolved prefixed name stays two unjoined slices — `ResolvedIri::Joined`
+— written with two `write_all` calls instead of being concatenated first).
+Each reader format's own `Term` reaches this shape through its own
+`resolve` method: trivial for `rdf::Term` (N-Triples terms are already
+absolute/canonical), more work for `turtle::term::Term` (joining a prefixed
+name against its `@prefix` declaration, and expanding a bare `42`/`true`
+into its lexical form plus the XSD datatype IRI it implies). A blank node
+that never had a source spelling (`[]`, a collection node) is written with
+a different label prefix (`_:b...`) than one that did (`_:l...`), so the
+two can never collide even in the same document. Literal text is copied
+through unescaped-as-written wherever possible; the one place this isn't a
+plain byte copy is a Turtle long/single-quoted string containing a raw `"`
+or newline, which Turtle allows unescaped but N-Triples' single-line
+`"..."` form doesn't — `NtWriter` re-escapes only what the target format
+actually forbids raw.
+
+`turtle_to_ntriples`/`ntriples_to_ntriples` stream through the source
+`Stream`'s own bounded window, so conversion works the same way over an
+in-memory slice, a memory-mapped file, or gzip input as every other reader
+in this crate does — nothing here requires the whole document in memory.
+
 ## Benchmarking
 
 Performance benchmarking (throughput, memory, plain vs. gzip, serial vs.

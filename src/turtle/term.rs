@@ -110,25 +110,25 @@ pub enum Iri {
     /// `@prefix`-declared namespace IRI (see [`Namespace`]); `local` is
     /// still a same-statement span, since the local part is always written
     /// in the statement that uses it. Resolving this to a full IRI is then
-    /// just concatenating the two — see [`Self::write_to`].
+    /// just pairing the two up, unjoined — see [`Self::resolve`].
     Prefixed { namespace: Namespace, local: Span },
     /// The `a` keyword, and `rdf:first`/`rdf:rest`/`rdf:nil` from expanding
     /// collection and blank-node property-list syntax sugar.
     WellKnown(WellKnown),
 }
 impl Iri {
-    /// Appends this IRI's text to `out` — the caller-supplied buffer this
-    /// crate otherwise avoids needing, required only because a resolved
-    /// `Prefixed` IRI is two non-adjacent pieces (namespace + local) with
-    /// nowhere contiguous to borrow a single `&[u8]` from.
-    pub fn write_to(self, record: &[u8], out: &mut Vec<u8>) {
+    /// This IRI's text, ready to write — see [`crate::rdf::ResolvedIri`]. A
+    /// `Prefixed` IRI's two pieces (namespace + local) come from different
+    /// places (`namespace` lives inside `self`; `local` is a span into
+    /// `record`) but never need to be copied together: the returned value
+    /// still just borrows both, unjoined.
+    pub fn resolve<'a>(&'a self, record: &'a [u8]) -> crate::rdf::ResolvedIri<'a> {
         match self {
-            Self::Full(span) => out.extend_from_slice(span.text(record)),
+            Self::Full(span) => crate::rdf::ResolvedIri::Direct(span.text(record)),
             Self::Prefixed { namespace, local } => {
-                out.extend_from_slice(namespace.as_bytes());
-                out.extend_from_slice(local.text(record));
+                crate::rdf::ResolvedIri::Joined(namespace.as_bytes(), local.text(record))
             }
-            Self::WellKnown(wk) => out.extend_from_slice(wk.as_bytes()),
+            Self::WellKnown(wk) => crate::rdf::ResolvedIri::Direct(wk.as_bytes()),
         }
     }
 }
@@ -182,6 +182,51 @@ pub enum Term {
     Literal(RdfLiteral),
     Numeric(NumKind, Span),
     Boolean(bool),
+}
+impl Term {
+    /// This term, resolved for writing — see [`crate::rdf::ResolvedTerm`].
+    /// A `Numeric`/`Boolean` shorthand becomes its lexical form paired with
+    /// the datatype IRI it implies (never written in the source, so a
+    /// `'static` constant); everything else just borrows from `self`/`record`.
+    pub fn resolve<'a>(&'a self, record: &'a [u8]) -> crate::rdf::ResolvedTerm<'a> {
+        use crate::rdf::{BlankId, ResolvedIri, ResolvedSuffix, ResolvedTerm};
+        match self {
+            Self::Iri(iri) => ResolvedTerm::Iri(iri.resolve(record)),
+            Self::Blank(BlankNode::Labeled(span)) => {
+                ResolvedTerm::BlankNode(BlankId::Named(span.text(record)))
+            }
+            Self::Blank(BlankNode::Anonymous(id)) => ResolvedTerm::BlankNode(BlankId::Fresh(*id)),
+            Self::Literal(lit) => ResolvedTerm::Literal {
+                lexical: lit.lexical.text(record),
+                suffix: match &lit.suffix {
+                    LiteralSuffix::None => ResolvedSuffix::None,
+                    LiteralSuffix::Lang(span) => ResolvedSuffix::Lang(span.text(record)),
+                    LiteralSuffix::Datatype(iri) => ResolvedSuffix::Datatype(iri.resolve(record)),
+                },
+            },
+            Self::Numeric(kind, span) => ResolvedTerm::Literal {
+                lexical: span.text(record),
+                suffix: ResolvedSuffix::Datatype(ResolvedIri::Direct(xsd_datatype(*kind))),
+            },
+            Self::Boolean(b) => ResolvedTerm::Literal {
+                lexical: if *b { b"true" } else { b"false" },
+                suffix: ResolvedSuffix::Datatype(ResolvedIri::Direct(
+                    b"http://www.w3.org/2001/XMLSchema#boolean",
+                )),
+            },
+        }
+    }
+}
+/// The XSD datatype a bare numeric literal implies — never written in the
+/// source (`42` carries no visible datatype), so this is the one place
+/// resolving a Turtle term reaches for text that isn't a slice of `self` or
+/// `record` at all.
+fn xsd_datatype(kind: NumKind) -> &'static [u8] {
+    match kind {
+        NumKind::Integer => b"http://www.w3.org/2001/XMLSchema#integer",
+        NumKind::Decimal => b"http://www.w3.org/2001/XMLSchema#decimal",
+        NumKind::Double => b"http://www.w3.org/2001/XMLSchema#double",
+    }
 }
 /// One decoded triple. `subject`/`predicate`/`object` spans are relative to
 /// the statement (record) they came from — see [`StatementData`].
