@@ -992,11 +992,14 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.s.expect(b'(')?;
         self.skip_trivia();
-        let start = self.q.expr_lists.start();
+        // Arguments may themselves contain calls whose own argument lists
+        // are pushed while parsing; collect this list's ids first so it
+        // lands contiguously in `expr_lists`.
+        let mut items = Vec::new();
         if self.s.peek() != Some(b')') {
             loop {
                 let e = self.expression()?;
-                self.q.expr_lists.push(e);
+                items.push(e);
                 self.skip_trivia();
                 if self.s.peek() == Some(b',') {
                     self.s.pos += 1;
@@ -1007,6 +1010,10 @@ impl<'a> Parser<'a> {
             }
         }
         self.s.expect(b')')?;
+        let start = self.q.expr_lists.start();
+        items.into_iter().for_each(|e| {
+            self.q.expr_lists.push(e);
+        });
         Ok(self.q.expr_lists.range_from(start))
     }
     fn is_signed_numeric_start(&self) -> bool {
@@ -1111,11 +1118,14 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         let distinct = self.try_keyword(b"DISTINCT")?;
         self.skip_trivia();
-        let start = self.q.expr_lists.start();
+        // Arguments may themselves contain calls whose own argument lists
+        // are pushed while parsing; collect this list's ids first so it
+        // lands contiguously in `expr_lists`.
+        let mut items = Vec::new();
         if self.s.peek() != Some(b')') {
             loop {
                 let e = self.expression()?;
-                self.q.expr_lists.push(e);
+                items.push(e);
                 self.skip_trivia();
                 if self.s.peek() == Some(b',') {
                     self.s.pos += 1;
@@ -1126,6 +1136,10 @@ impl<'a> Parser<'a> {
             }
         }
         self.s.expect(b')')?;
+        let start = self.q.expr_lists.start();
+        items.into_iter().for_each(|e| {
+            self.q.expr_lists.push(e);
+        });
         Ok((distinct, self.q.expr_lists.range_from(start)))
     }
     /// Every `BuiltInCall` beyond `BOUND` shares one shape once parsed as a

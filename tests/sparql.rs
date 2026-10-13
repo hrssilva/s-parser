@@ -250,3 +250,18 @@ fn window_boundaries_need_more_then_succeed() {
         }
     }
 }
+
+#[test]
+fn nested_call_arguments_stay_in_their_own_lists() {
+    use s_parser::sparql::algebra::Algebra;
+    use s_parser::sparql::expr::{Builtin, Expr};
+    let q = ok("SELECT * WHERE { ?s ?p ?o FILTER(CONCAT(\"[\", STR(?o), \"]\") != COUNT(?x)) }");
+    let data = q.data();
+    let root = data.root.unwrap();
+    let Algebra::Filter(f, _) = data.node(root) else { panic!("{:?}", data.node(root)) };
+    let Expr::Ne(concat, _) = data.expr(f) else { panic!() };
+    let Expr::Call(Builtin::Concat, args) = data.expr(concat) else { panic!() };
+    let args = data.expr_ids(args);
+    assert_eq!(args.len(), 3);
+    assert!(matches!(data.expr(args[1]), Expr::Call(Builtin::Str, inner) if data.expr_ids(inner).len() == 1));
+}
